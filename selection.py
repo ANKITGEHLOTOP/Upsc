@@ -5,8 +5,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # Bot Configuration
-# It is best practice to use Environment Variables, but hardcoding works for testing.
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
+# Uses env var if available, otherwise falls back to your token
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8424175338:AAFMsg2-1IPVwGhZB9-oGWYq0O4CofTu28k")
 
 # Enable logging
 logging.basicConfig(
@@ -508,4 +508,44 @@ async def process_extraction_result(update, course_name, result):
         f"🎯 *{course_name}*\n\n"
         f"📊 *Extraction Complete!*\n"
         f"• 🎥 Total Videos: {total_videos}\n"
-        f"• 📄 Total PDF
+        f"• 📄 Total PDFs: {total_pdfs}\n"
+        f"• 📦 File: `{filename}`\n\n"
+        f"✅ *All links are ready to download!*"
+    )
+    
+    try:
+        with open(filename, 'rb') as f:
+            if update.message:
+                await update.message.reply_document(
+                    document=f,
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+            elif update.callback_query:
+                await update.callback_query.message.reply_document(
+                    document=f,
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+    except Exception as e:
+        logger.error(f"Error sending file: {e}")
+    finally:
+        # Cleanup file after sending
+        if os.path.exists(filename):
+            os.remove(filename)
+
+def main():
+    """Start the bot."""
+    # Create the Application and pass it your bot's token.
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Run the bot until the user presses Ctrl-C
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
