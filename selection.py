@@ -51,7 +51,7 @@ class SelectionWayBot:
     async def get_all_batches(self):
         """Get all active batches (Fixed limit=100)"""
         # Note the indentation here (8 spaces)
-        url = "https://backend.multistreaming.site/api/courses/active?userId=1448640&limit=100&offset=0"
+        url = "https://backend.multistreaming.site/api/courses/"
         
         headers = {
             "host": "backend.multistreaming.site",
@@ -370,3 +370,4 @@ if __name__ == "__main__":
     print("🤖 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
     
+
