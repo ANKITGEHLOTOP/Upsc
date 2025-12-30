@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
 PORT = int(os.environ.get("PORT", "8000"))  # Required for Koyeb
-ITEMS_PER_PAGE = 10  # Number of batches per message
+ITEMS_PER_PAGE = 20  # Number of batches per message
 
 # --- LOGGING ---
 logging.basicConfig(
@@ -401,4 +401,5 @@ if __name__ == "__main__":
     # Using run_polling within the existing loop context
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
                 
+
 
