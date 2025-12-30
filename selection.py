@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 # Bot Configuration
 # Uses env var if available, otherwise falls back to your token
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8424175338:AAFMsg2-1IPVwGhZB9-oGWYq0O4CofTu28k")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
 
 # Enable logging
 logging.basicConfig(
@@ -549,3 +549,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
