@@ -9,8 +9,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
-PORT = int(os.environ.get("PORT", "8000"))  # Required for Koyeb
-ITEMS_PER_PAGE = 20  # Number of batches per message
+PORT = int(os.environ.get("PORT", "8000"))
+ITEMS_PER_PAGE = 10
 
 # --- LOGGING ---
 logging.basicConfig(
@@ -48,9 +48,9 @@ class SelectionWayBot:
         if not url: return ""
         return url.replace(" ", "%")
 
-        async def get_all_batches(self):
-        """Get all active batches (Fix: Added limit=100 to fetch all)"""
-        # Added &limit=100 to fetch more courses
+    async def get_all_batches(self):
+        """Get all active batches (Fixed limit=100)"""
+        # Note the indentation here (8 spaces)
         url = "https://backend.multistreaming.site/api/courses/active?userId=1448640&limit=100&offset=0"
         
         headers = {
@@ -66,15 +66,12 @@ class SelectionWayBot:
             courses_response = response.json()
             if courses_response.get("state") == 200:
                 data = courses_response["data"]
-                # Optional: Filter out test/dummy courses if needed
-                # data = [c for c in data if c.get('price') != 0] 
                 return True, data
             else:
                 return False, "Failed to get batches"
                 
         except Exception as e:
             return False, f"Error: {str(e)}"
-
 
     async def get_my_batches(self, user_id):
         """Get user's own batches"""
@@ -90,7 +87,6 @@ class SelectionWayBot:
             resp = user_data['session'].post(url, headers=headers, json=payload)
             data = resp.json()
             if str(data.get("state")) == "200":
-                # Flatten the structure for "My Batches"
                 flat_list = []
                 for group in data.get("data", []):
                     flat_list.extend(group.get("liveCourses", []))
@@ -125,21 +121,15 @@ class SelectionWayBot:
             return False, f"❌ Login error: {str(e)}"
 
     async def extract_course_data(self, user_id, course_id, course_name, is_public=True):
-        """Unified extraction logic"""
         try:
             session = requests.Session()
-            # If private (logged in), use the logged-in session
             if not is_public:
                 if user_id in self.user_sessions:
                     session = self.user_sessions[user_id]['session']
                 else:
                     return False, "Login expired or required."
 
-            # 1. Get Course Info (PDF)
-            # Logic differs slightly for public vs private usually, but trying generic approach first
             pdf_url = ""
-            
-            # 2. Get Classes
             classes_url = f"https://backend.multistreaming.site/api/courses/{course_id}/classes?populate=full"
             headers = {"host": "backend.multistreaming.site", **self.base_headers}
             
@@ -147,7 +137,6 @@ class SelectionWayBot:
             classes_data = resp.json()
             
             if classes_data.get("state") == 200:
-                # Try to find PDF from active batch list if public
                 if is_public:
                     _, all_batches = await self.get_all_batches()
                     for b in all_batches:
@@ -166,7 +155,6 @@ class SelectionWayBot:
             return False, f"Error: {str(e)}"
 
     def process_content(self, data):
-        """Extract links"""
         video_links = []
         pdf_links = []
         
@@ -177,7 +165,6 @@ class SelectionWayBot:
             for topic in data["classes_data"]["classes"]:
                 for cls in topic.get("classes", []):
                     title = cls.get("title", "Unknown")
-                    # Find best quality video
                     best_url = cls.get("class_link", "")
                     quality_tag = "Link"
                     
@@ -202,13 +189,9 @@ def get_batches_keyboard(current_page, total_pages, list_type):
     buttons = []
     if current_page > 1:
         buttons.append(InlineKeyboardButton("<< Prev", callback_data=f"page|{list_type}|{current_page-1}"))
-    
-    # Add page counter in middle (non-clickable)
     buttons.append(InlineKeyboardButton(f"{current_page}/{total_pages}", callback_data="noop"))
-    
     if current_page < total_pages:
         buttons.append(InlineKeyboardButton("Next >>", callback_data=f"page|{list_type}|{current_page+1}"))
-    
     return InlineKeyboardMarkup([buttons])
 
 def generate_page_text(batches, page, list_type):
@@ -262,16 +245,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if success:
             context.user_data['public_batches'] = batches
             context.user_data['mode'] = 'public'
-            
             total_pages = math.ceil(len(batches) / ITEMS_PER_PAGE)
             text = generate_page_text(batches, 1, "all")
             kb = get_batches_keyboard(1, total_pages, "all")
-            
             await query.edit_message_text(text, reply_markup=kb, parse_mode='Markdown')
         else:
             await query.edit_message_text(f"❌ Error: {batches}")
 
-    # PAGINATION HANDLER
     elif data.startswith("page|"):
         _, list_type, page_num = data.split("|")
         page = int(page_num)
@@ -293,33 +273,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await query.edit_message_text(text, reply_markup=kb, parse_mode='Markdown')
         except Exception:
-            pass # Ignore if message is not modified
+            pass
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
     
-    # 1. LOGIN LOGIC
     if context.user_data.get('awaiting_login'):
         if ":" in text:
             email, password = text.split(":", 1)
             msg = await update.message.reply_text("🔄 Verifying credentials...")
             success, resp = await bot_logic.login_user(email.strip(), password.strip(), user_id)
-            
             if success:
                 context.user_data['awaiting_login'] = False
                 await msg.edit_text("✅ Login Success! Fetching your batches...")
-                
-                # Fetch private batches immediately
                 ok, batches = await bot_logic.get_my_batches(user_id)
                 if ok:
                     context.user_data['my_batches'] = batches
                     context.user_data['mode'] = 'private'
-                    
                     total_pages = math.ceil(len(batches) / ITEMS_PER_PAGE)
                     txt = generate_page_text(batches, 1, "my")
                     kb = get_batches_keyboard(1, total_pages, "my")
-                    
                     await update.message.reply_text(txt, reply_markup=kb, parse_mode='Markdown')
                 else:
                     await update.message.reply_text(f"❌ Login ok, but failed to fetch batches: {batches}")
@@ -328,11 +302,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ Invalid format. Use `email:password`")
             
-    # 2. EXTRACTION LOGIC
     else:
         mode = context.user_data.get('mode')
-        
-        # Handle Private Batch Index Selection
         if mode == 'private' and text.isdigit():
             idx = int(text)
             batches = context.user_data.get('my_batches', [])
@@ -342,11 +313,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("❌ Invalid number.")
 
-        # Handle Public Batch ID
         elif mode == 'public':
-            # Basic validation for ID length usually around 24 chars for Mongo IDs
             if len(text) > 10: 
-                # Find name if possible
                 name = "Unknown Course"
                 for b in context.user_data.get('public_batches', []):
                     if b['id'] == text:
@@ -356,26 +324,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("❌ For public batches, please reply with the exact **Batch ID** (long code).", parse_mode='Markdown')
         else:
-            # Fallback
             await update.message.reply_text("⚠️ Please select an option from /start first.")
 
 async def process_extraction(update, user_id, course_id, course_name, is_public):
     status_msg = await update.message.reply_text(f"🔄 Extracting *{course_name}*...", parse_mode='Markdown')
-    
     success, data = await bot_logic.extract_course_data(user_id, course_id, course_name, is_public)
     
     if success:
         v_links, p_links = bot_logic.process_content(data)
-        
-        # Create txt file
         safe_name = "".join(c for c in course_name if c.isalnum() or c in (' ', '-', '_')).strip()
         filename = f"{safe_name}.txt"
         
         content = f"🎯 {course_name}\n\n"
-        if p_links:
-            content += "📄 PDFS:\n" + "\n".join(p_links) + "\n\n"
-        if v_links:
-            content += "🎥 VIDEOS:\n" + "\n".join(v_links)
+        if p_links: content += "📄 PDFS:\n" + "\n".join(p_links) + "\n\n"
+        if v_links: content += "🎥 VIDEOS:\n" + "\n".join(v_links)
             
         with open(filename, "w", encoding="utf-8") as f:
             f.write(content)
@@ -388,33 +350,23 @@ async def process_extraction(update, user_id, course_id, course_name, is_public)
             await update.message.reply_document(document=f, caption=caption, parse_mode='Markdown')
             
         await status_msg.delete()
-        os.remove(filename) # Clean up for Koyeb
+        os.remove(filename)
     else:
         await status_msg.edit_text(f"❌ Failed: {data}")
 
-# --- MAIN ---
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        print("Error: BOT_TOKEN env variable not set.")
-        exit(1)
-
-    # 1. Start Web Server for Koyeb
+    if not BOT_TOKEN or "YOUR_BOT_TOKEN_HERE" in BOT_TOKEN:
+        print("⚠️ Warning: BOT_TOKEN is missing or default. Make sure it's set in Koyeb Envs.")
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(run_web_server())
 
-    # 2. Start Bot
     app = Application.builder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     print("🤖 Bot is running...")
-    
-    # Using run_polling within the existing loop context
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
-                
-
-
-
+    
