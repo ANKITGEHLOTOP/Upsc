@@ -48,19 +48,33 @@ class SelectionWayBot:
         if not url: return ""
         return url.replace(" ", "%")
 
-    async def get_all_batches(self):
-        """Get all active batches without login"""
-        url = "https://backend.multistreaming.site/api/courses/active?userId=1448640"
-        headers = {"host": "backend.multistreaming.site", **self.base_headers}
+        async def get_all_batches(self):
+        """Get all active batches (Fix: Added limit=100 to fetch all)"""
+        # Added &limit=100 to fetch more courses
+        url = "https://backend.multistreaming.site/api/courses/active?userId=1448640&limit=100&offset=0"
+        
+        headers = {
+            "host": "backend.multistreaming.site",
+            **self.base_headers
+        }
+        
         try:
-            # Using sync requests in async wrapper could block, but fine for low traffic
-            resp = requests.get(url, headers=headers)
-            data = resp.json()
-            if data.get("state") == 200:
-                return True, data["data"]
-            return False, "Failed to get batches"
+            session = requests.Session()
+            response = session.get(url, headers=headers)
+            response.raise_for_status()
+            
+            courses_response = response.json()
+            if courses_response.get("state") == 200:
+                data = courses_response["data"]
+                # Optional: Filter out test/dummy courses if needed
+                # data = [c for c in data if c.get('price') != 0] 
+                return True, data
+            else:
+                return False, "Failed to get batches"
+                
         except Exception as e:
             return False, f"Error: {str(e)}"
+
 
     async def get_my_batches(self, user_id):
         """Get user's own batches"""
@@ -401,5 +415,6 @@ if __name__ == "__main__":
     # Using run_polling within the existing loop context
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
                 
+
 
 
