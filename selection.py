@@ -1,10 +1,12 @@
 import requests
 import logging
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # Bot Configuration
-BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"
+# It is best practice to use Environment Variables, but hardcoding works for testing.
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
 
 # Enable logging
 logging.basicConfig(
@@ -171,7 +173,7 @@ class SelectionWayBot:
 
     async def extract_course_data_with_login(self, user_id, course_id, course_name):
         """Extract course data with login"""
-        if user_id not in bot.user_sessions:
+        if user_id not in self.user_sessions:
             return False, "Please login first!"
         
         user_data = self.user_sessions[user_id]
@@ -485,7 +487,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ {result}")
     
     elif text.startswith('/'):
-        await update.message.reply_text("Please use /start to begin")
+        pass # Ignore other commands
 
 async def process_extraction_result(update, course_name, result):
     """Process extraction result and send file"""
@@ -506,34 +508,4 @@ async def process_extraction_result(update, course_name, result):
         f"🎯 *{course_name}*\n\n"
         f"📊 *Extraction Complete!*\n"
         f"• 🎥 Total Videos: {total_videos}\n"
-        f"• 📄 Total PDFs: {total_pdfs}\n"
-        f"• 📦 File: `{filename}`\n\n"
-        f"✅ *All links are ready to use!*"
-    )
-    
-    # Send file to user
-    with open(filename, 'rb') as f:
-        await update.message.reply_document(
-            document=f,
-            filename=filename,
-            caption=caption,
-            parse_mode='Markdown'
-        )
-
-def main():
-    """Start the bot"""
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(login_extract|list_batches)$"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Start the Bot
-    print("🤖 Bot is running...")
-    application.run_polling()
-
-if __name__ == '__main__':
-
-    main()
-
+        f"• 📄 Total PDF
