@@ -8,6 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # --- CONFIGURATION ---
+# Get Token from Koyeb Environment Variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
 PORT = int(os.environ.get("PORT", "8000"))
 ITEMS_PER_PAGE = 10
@@ -19,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- WEB SERVER FOR KOYEB ---
+# --- WEB SERVER FOR KOYEB (KEEP ALIVE) ---
 async def health_check(request):
     return web.Response(text="Bot is alive!", status=200)
 
@@ -51,19 +52,26 @@ class SelectionWayBot:
     async def get_all_batches(self):
         """Get all active batches"""
         url = "https://backend.multistreaming.site/api/courses/"
-        headers = {"host": "backend.multistreaming.site", **self.base_headers}
+        headers = {
+            "host": "backend.multistreaming.site",
+            **self.base_headers
+        }
         
         try:
             session = requests.Session()
             response = session.get(url, headers=headers)
+            
             try:
                 courses_response = response.json()
             except ValueError:
-                return False, f"Server Error: {response.status_code}"
+                return False, f"Server Error (Invalid JSON): {response.status_code}"
 
             if courses_response.get("state") == 200:
-                return True, courses_response["data"]
-            return False, "Failed to get batches"
+                data = courses_response["data"]
+                return True, data
+            else:
+                return False, "Failed to get batches"
+                
         except Exception as e:
             return False, f"Error: {str(e)}"
 
@@ -122,6 +130,11 @@ class SelectionWayBot:
             return False, f"❌ Login error: {str(e)}"
 
     async def extract_course_data(self, user_id, course_id, course_name, is_public=True):
+        """
+        Robust extraction:
+        1. Tries to get Videos (Critical)
+        2. Tries to get PDFs (Optional - ignores errors if missing)
+        """
         try:
             session = requests.Session()
             if not is_public:
@@ -132,7 +145,7 @@ class SelectionWayBot:
 
             headers = {"host": "backend.multistreaming.site", **self.base_headers}
 
-            # 1. Fetch Video Classes
+            # 1. Fetch Video Classes (MUST SUCCEED)
             classes_url = f"https://backend.multistreaming.site/api/courses/{course_id}/classes?populate=full"
             resp_cls = session.get(classes_url, headers=headers)
             
@@ -140,38 +153,42 @@ class SelectionWayBot:
             try:
                 classes_json = resp_cls.json()
             except ValueError:
+                # If videos fail to parse, we can't do anything
                 return False, f"Video API Error: {resp_cls.status_code}"
             
-            # 2. Fetch PDFs (USING NEW API ENDPOINT)
+            # 2. Fetch PDFs (OPTIONAL - Handle 404/HTML errors gracefully)
             pdfs_data = []
             try:
-                # UPDATED: Using the new groupBy=topic endpoint
-                pdfs_url = f"https://backend.multistreaming.site/api/courses/{course_id}/pdfs?groupBy=topic"
+                pdfs_url = f"https://backend.multistreaming.site/api/courses/{course_id}/study-materials"
                 resp_pdf = session.get(pdfs_url, headers=headers)
                 
+                # Only try to parse if status is 200, otherwise assume no PDFs
                 if resp_pdf.status_code == 200:
                     try:
                         pdf_json = resp_pdf.json()
                         if pdf_json.get("state") == 200:
                             pdfs_data = pdf_json.get("data", [])
                     except ValueError:
-                        pass
+                        pass # JSON error on PDFs -> Ignore
             except Exception:
-                pass
+                pass # Any connection error on PDFs -> Ignore
 
-            # 3. Get Batch Info PDF
+            # 3. Get Batch Info PDF (from public list cache)
             batch_pdf_url = ""
             if is_public:
                 try:
-                    # Quick fetch to get batch PDF from list
+                    # We reuse the get_all_batches logic but don't let it crash this function
                     url = "https://backend.multistreaming.site/api/courses/"
                     r = session.get(url, headers=headers)
-                    if r.status_code == 200:
+                    try:
                         d = r.json()
-                        for b in d.get("data", []):
-                            if str(b.get('id')) == str(course_id):
-                                batch_pdf_url = b.get('batchInfoPdfUrl', "")
-                                break
+                        if d.get("state") == 200:
+                            for b in d["data"]:
+                                if str(b.get('id')) == str(course_id):
+                                    batch_pdf_url = b.get('batchInfoPdfUrl', "")
+                                    break
+                    except:
+                        pass
                 except:
                     pass
             
@@ -182,7 +199,7 @@ class SelectionWayBot:
                     "batch_pdf_url": self.clean_url(batch_pdf_url),
                     "course_name": course_name
                 }
-            return False, "Failed to get class data"
+            return False, "Failed to get class data (API State != 200)"
         except Exception as e:
             logger.error(e)
             return False, f"Error: {str(e)}"
@@ -195,49 +212,17 @@ class SelectionWayBot:
         if data.get("batch_pdf_url"):
             pdf_links.append(f"Batch Info PDF -> {data['batch_pdf_url']}")
 
-        # 2. Process Topic-wise PDFs (Updated for new API structure)
+        # 2. Process Study Material PDFs
         if data.get("pdfs_data"):
-            # The new API likely returns a list of topics, each containing PDFs
-            raw_pdfs = data["pdfs_data"]
+            for pdf in data["pdfs_data"]:
+                title = pdf.get("title", "Unknown PDF")
+                url = pdf.get("materialLink") or pdf.get("url")
+                if url:
+                    pdf_links.append(f"{title} -> {self.clean_url(url)}")
             
-            # Helper to extract from a single PDF object
-            def extract_single_pdf(p_obj, topic_prefix=""):
-                t = p_obj.get("title", "Unknown PDF")
-                u = p_obj.get("url") or p_obj.get("materialLink")
-                if u:
-                    return f"{topic_prefix}{t} -> {self.clean_url(u)}"
-                return None
-
-            if isinstance(raw_pdfs, list):
-                for item in raw_pdfs:
-                    # Check if item is a grouping (Topic)
-                    topic_name = item.get("title", "General")
-                    
-                    # Case A: Item itself is a PDF
-                    if "url" in item or "materialLink" in item:
-                        link = extract_single_pdf(item)
-                        if link: pdf_links.append(link)
-                    
-                    # Case B: Item contains a list of PDFs (nested)
-                    elif "pdfs" in item and isinstance(item["pdfs"], list):
-                        pdf_links.append(f"\n📂 {topic_name}:") # Header for topic
-                        for sub_pdf in item["pdfs"]:
-                            link = extract_single_pdf(sub_pdf)
-                            if link: pdf_links.append(link)
-                            
-                    # Case C: Item contains 'resources' or generic list
-                    elif "resources" in item:
-                         for sub_pdf in item["resources"]:
-                            link = extract_single_pdf(sub_pdf)
-                            if link: pdf_links.append(link)
-
         # 3. Process Videos
         if data.get("classes_data") and "classes" in data["classes_data"]:
             for topic in data["classes_data"]["classes"]:
-                # Add topic header for videos
-                topic_title = topic.get("title", "Untitled Topic")
-                video_links.append(f"\n🎥 {topic_title}:")
-                
                 for cls in topic.get("classes", []):
                     title = cls.get("title", "Unknown")
                     best_url = cls.get("class_link", "")
@@ -402,7 +387,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Please select an option from /start first.")
 
 async def process_extraction(update, user_id, course_id, course_name, is_public):
-    status_msg = await update.message.reply_text(f"🔄 Extracting *{course_name}*...", parse_mode='Markdown')
+    status_msg = await update.message.reply_text(f"🔄 Extracting Videos & PDFs for *{course_name}*...", parse_mode='Markdown')
     success, data = await bot_logic.extract_course_data(user_id, course_id, course_name, is_public)
     
     if success:
@@ -432,7 +417,7 @@ async def process_extraction(update, user_id, course_id, course_name, is_public)
             
         caption = (f"✅ *Extraction Complete*\n"
                    f"📁 {course_name}\n"
-                   f"📹 Videos: {len([l for l in v_links if '->' in l])} | 📄 PDFs: {len([l for l in p_links if '->' in l])}")
+                   f"📹 Videos: {len(v_links)} | 📄 PDFs: {len(p_links)}")
                    
         with open(filename, "rb") as f:
             await update.message.reply_document(document=f, caption=caption, parse_mode='Markdown')
@@ -444,12 +429,14 @@ async def process_extraction(update, user_id, course_id, course_name, is_public)
 
 if __name__ == "__main__":
     if not BOT_TOKEN or "YOUR_BOT_TOKEN_HERE" in BOT_TOKEN:
-        print("⚠️ Warning: BOT_TOKEN is missing.")
+        print("⚠️ Warning: BOT_TOKEN is missing. Make sure it's set in Koyeb Envs.")
     
+    # Create webserver loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(run_web_server())
 
+    # Start Bot
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -457,4 +444,4 @@ if __name__ == "__main__":
     
     print("🤖 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
-            
+
