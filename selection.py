@@ -3,8 +3,8 @@ import asyncio
 import aiohttp
 import io
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # ---------------- CONFIG ----------------
 # ⚠️ REPLACE THIS WITH YOUR NEW TOKEN FROM BOTFATHER
@@ -117,26 +117,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("❌ No courses found or API error.")
         return
 
-    # Store courses in context for easier access later (optional, but good for caching)
+    # Store courses in context for easier lookup
     context.user_data['courses'] = {str(c['id']): c for c in courses}
     
     message_text = "📚 **Available Batches:**\n\n"
-    keyboard = []
-    
-    # Create buttons for courses (Split into chunks if too many, but here we list basic)
-    # Telegram has a limit on message size. If > 50 courses, we might need a different approach.
-    # For now, let's list them as text and ask user to copy ID.
     
     for c in courses:
         c_id = c.get('id')
         c_title = c.get('title')
-        message_text += f"🆔 `{c_id}` : {c_title}\n"
+        # Use code block for ID so it's easy to copy
+        message_text += f"ID: `{c_id}`\nName: {c_title}\n\n"
 
-    message_text += "\n👇 **Copy an ID from above and reply with it to extract.**"
+    message_text += "👇 **Copy an ID from above and reply with it to extract.**"
     
     # Split message if too long (Telegram limit 4096 chars)
     if len(message_text) > 4000:
-        # Simple chunking
         chunks = [message_text[i:i+4000] for i in range(0, len(message_text), 4000)]
         for chunk in chunks:
             await update.message.reply_markdown(chunk)
@@ -147,23 +142,23 @@ async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles text input (Course ID) and generates the file."""
     course_id = update.message.text.strip()
     
-    # Basic validation: check if numeric
-    if not course_id.isdigit():
-        await update.message.reply_text("❌ Please send a valid numeric Course ID.")
+    # FIXED: Removed isdigit() check to allow alphanumeric IDs
+    if len(course_id) < 5: 
+        await update.message.reply_text("❌ ID seems too short. Please check.")
         return
 
-    status_msg = await update.message.reply_text(f"⏳ Processing Course ID: {course_id}...")
+    status_msg = await update.message.reply_text(f"⏳ Processing Course ID: `{course_id}`...", parse_mode='Markdown')
 
     headers = BASE_HEADERS.copy()
     headers["host"] = "backend.multistreaming.site"
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        # 1. Get Course Info (to get title)
-        # We try to get title from cache or default to ID
-        course_title = f"Course_{course_id}"
-        courses_map = context.user_data.get('courses', {})
+        # 1. Get Course Info (try to look up title, else use ID)
+        course_title = f"Batch_{course_id}"
         batch_pdf = None
         
+        # Check if we have cached course data from /start
+        courses_map = context.user_data.get('courses', {})
         if course_id in courses_map:
             course_obj = courses_map[course_id]
             course_title = course_obj.get('title', course_title)
@@ -183,13 +178,15 @@ async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pdf_links.insert(0, f"Batch PDF -> {clean_url(batch_pdf)}")
 
         if not video_links and not pdf_links:
-            await status_msg.edit_text("❌ No content found for this ID.")
+            await status_msg.edit_text("❌ No content found for this ID. It might be empty or invalid.")
             return
 
         # 4. Create In-Memory File
+        # Sanitize filename
         safe_filename = "".join(c for c in course_title if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
-        file_buffer = io.StringIO()
+        if not safe_filename: safe_filename = "course_data"
         
+        file_buffer = io.StringIO()
         file_buffer.write(f"Course: {course_title}\n")
         file_buffer.write(f"ID: {course_id}\n")
         file_buffer.write("-" * 50 + "\n\n")
@@ -206,10 +203,8 @@ async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for link in pdf_links:
                 file_buffer.write(link + "\n\n")
 
-        # Reset pointer to start of file
+        # Convert to bytes for Telegram
         file_buffer.seek(0)
-        
-        # Convert String buffer to Bytes buffer for Telegram
         bytes_io = io.BytesIO(file_buffer.getvalue().encode('utf-8'))
         bytes_io.name = f"{safe_filename}.txt"
 
@@ -223,10 +218,9 @@ async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- MAIN ----------------
 if __name__ == '__main__':
-    # Initialize Bot
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Add Handlers
+    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_course_id))
     
