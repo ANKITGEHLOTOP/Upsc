@@ -48,35 +48,33 @@ class SelectionWayBot:
 
     async def get_all_batches(self):
         """
-        Robust strategy:
-        1. Try Vercel API
-        2. If that fails/bad format -> Fallback to Backend API
+        FAIL-SAFE STRATEGY:
+        1. Attempt Vercel API.
+        2. If Vercel fails (network error OR unknown structure), silently fallback to Backend API.
         """
-        # --- ATTEMPT 1: VERCEL ---
+        # --- SOURCE 1: VERCEL ---
         try:
             url = "https://selection-way.vercel.app/batches"
-            resp = requests.get(url, headers=self.base_headers, timeout=10)
+            resp = requests.get(url, headers=self.base_headers, timeout=5)
             data = resp.json()
 
-            # Check 1: Wrapper with 'state' (int or str)
-            if "state" in data and str(data["state"]) == "200" and "data" in data:
-                return True, data["data"]
-            
-            # Check 2: Direct List
+            # Handle various potential Vercel structures
             if isinstance(data, list):
                 return True, data
             
-            # Check 3: Wrapper with just 'data' key
-            if isinstance(data, dict) and "data" in data:
-                return True, data["data"]
-                
-            logger.warning(f"Vercel structure unknown. Keys found: {list(data.keys())}")
-            # If we reach here, Vercel format is weird. Proceed to fallback.
+            if isinstance(data, dict):
+                if "data" in data and isinstance(data["data"], list):
+                    return True, data["data"]
+                if "courses" in data and isinstance(data["courses"], list):
+                    return True, data["courses"]
+            
+            # If we reach here, structure is unknown. Log it, but don't return False yet.
+            logger.warning(f"⚠️ Vercel structure mismatch. Falling back to backend.")
             
         except Exception as e:
-            logger.error(f"Vercel API connection failed: {e}")
+            logger.warning(f"⚠️ Vercel API failed: {e}. Falling back to backend.")
 
-        # --- ATTEMPT 2: BACKEND FALLBACK (Reliable) ---
+        # --- SOURCE 2: BACKEND FALLBACK (Reliable) ---
         try:
             url = "https://backend.multistreaming.site/api/courses/"
             headers = {
@@ -90,9 +88,9 @@ class SelectionWayBot:
                 return True, data["data"]
                 
         except Exception as e:
-            return False, f"All APIs failed. Last Error: {e}"
+            return False, f"All sources failed. Last Error: {e}"
 
-        return False, "Failed to fetch batches from both sources."
+        return False, "Failed to fetch batches from both Vercel and Backend."
 
     async def get_my_batches(self, user_id):
         if user_id not in self.user_sessions:
