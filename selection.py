@@ -51,29 +51,22 @@ class SelectionWayBot:
 
     def clean_url(self, url):
         if not url: return ""
-        return url.replace(" ", "%")
+        return url.strip().replace(" ", "%20")
 
     async def get_all_batches(self):
-        """Get all active batches (Using COURSES_API)"""
+        """Get all active batches"""
         url = COURSES_API
-        
-        headers = {
-            "host": "backend.multistreaming.site",
-            **self.base_headers
-        }
+        headers = {"host": "backend.multistreaming.site", **self.base_headers}
         
         try:
             session = requests.Session()
             response = session.get(url, headers=headers)
             response.raise_for_status()
-            
             courses_response = response.json()
             if courses_response.get("state") == 200:
-                data = courses_response["data"]
-                return True, data
+                return True, courses_response["data"]
             else:
                 return False, "Failed to get batches"
-                
         except Exception as e:
             return False, f"Error: {str(e)}"
 
@@ -135,28 +128,30 @@ class SelectionWayBot:
 
             headers = {"host": "backend.multistreaming.site", **self.base_headers}
 
-            # 1. Fetch Classes using CLASSES_API
+            # 1. Fetch Classes (Contains Videos AND Class Notes)
             classes_url = CLASSES_API.format(course_id=course_id)
             resp_classes = session.get(classes_url, headers=headers)
             classes_data = resp_classes.json()
             
-            # 2. Fetch PDFs using PDFS_API
+            # 2. Fetch Separate Study Materials (Extra PDFs)
             pdfs_url = PDFS_API.format(course_id=course_id)
             resp_pdfs = session.get(pdfs_url, headers=headers)
             pdfs_data = resp_pdfs.json() if resp_pdfs.status_code == 200 else {}
 
             if classes_data.get("state") == 200:
-                # Optional: Still try to get the Batch Info PDF from public list if needed
+                # 3. Try to get Batch Info PDF (Syllabus etc)
                 batch_info_pdf = ""
                 if is_public:
-                    _, all_batches = await self.get_all_batches()
-                    for b in all_batches:
-                        if str(b.get('id')) == str(course_id):
-                            batch_info_pdf = b.get('batchInfoPdfUrl', "")
-                            break
+                    try:
+                        _, all_batches = await self.get_all_batches()
+                        for b in all_batches:
+                            if str(b.get('id')) == str(course_id):
+                                batch_info_pdf = b.get('batchInfoPdfUrl', "")
+                                break
+                    except: pass
                 
                 return True, {
-                    "classes_data": classes_data["data"],
+                    "classes_data": classes_data.get("data", {}),
                     "pdfs_data": pdfs_data.get("data", []),
                     "batch_info_pdf": self.clean_url(batch_info_pdf),
                     "course_name": course_name
@@ -170,38 +165,66 @@ class SelectionWayBot:
         video_links = []
         pdf_links = []
         
-        # Process Batch Info PDF
+        # 1. Add Batch Info PDF
         if data.get("batch_info_pdf"):
             pdf_links.append(f"ℹ️ Batch Info: {data['batch_info_pdf']}")
 
-        # Process Study Material PDFs (from PDFS_API)
+        # 2. Add Study Material PDFs (from separate API)
         if data.get("pdfs_data"):
             for item in data["pdfs_data"]:
-                # Adjust key names 'title' or 'url' based on actual API response
                 title = item.get("title", "Untitled PDF")
                 url = item.get("fileUrl") or item.get("url", "")
                 if url:
-                    pdf_links.append(f"📄 {title}: {url}")
-            
-        # Process Videos
+                    pdf_links.append(f"📚 {title}: {self.clean_url(url)}")
+
+        # 3. Process Classes (Extract Videos AND Class-level PDFs)
         if data.get("classes_data") and "classes" in data["classes_data"]:
             for topic in data["classes_data"]["classes"]:
+                # Sometimes topics have resources too, but usually it's in the nested classes
+                
                 for cls in topic.get("classes", []):
-                    title = cls.get("title", "Unknown")
-                    best_url = cls.get("class_link", "")
+                    title = cls.get("title", "Unknown Class")
+                    
+                    # --- A. Extract VIDEO ---
+                    best_video_url = cls.get("class_link", "")
                     quality_tag = "Link"
                     
                     recordings = cls.get("mp4Recordings", [])
+                    # Try to find best quality video
                     for q in ["720p", "480p", "360p"]:
                         for rec in recordings:
                             if rec.get("quality") == q:
-                                best_url = rec.get("url")
+                                best_video_url = rec.get("url")
                                 quality_tag = q
                                 break
-                        if best_url and quality_tag == q: break
+                        if best_video_url and quality_tag == q: break
                     
-                    if best_url:
-                        video_links.append(f"{title} ({quality_tag}): {best_url}")
+                    if best_video_url:
+                        video_links.append(f"{title} ({quality_tag}): {self.clean_url(best_video_url)}")
+
+                    # --- B. Extract PDF/NOTES from the Class Object ---
+                    # Check all common fields where PDFs hide in these APIs
+                    possible_pdf_keys = ["note", "attachment", "pdf", "material", "notesUrl", "pdfUrl"]
+                    
+                    found_pdf = None
+                    
+                    # Method 1: Direct key check
+                    for key in possible_pdf_keys:
+                        val = cls.get(key)
+                        if val and isinstance(val, str) and (val.startswith("http") or val.endswith(".pdf")):
+                            found_pdf = val
+                            break
+                    
+                    # Method 2: Check inside 'resources' or 'attachments' array if it exists
+                    if not found_pdf and "attachments" in cls:
+                        for att in cls["attachments"]:
+                            if att.get("url"): 
+                                found_pdf = att.get("url")
+                                break
+
+                    # If we found a PDF attached to this class
+                    if found_pdf:
+                        pdf_links.append(f"📝 {title} (Notes): {self.clean_url(found_pdf)}")
                         
         return video_links, pdf_links
 
@@ -361,7 +384,10 @@ async def process_extraction(update, user_id, course_id, course_name, is_public)
         content = f"🎯 {course_name}\n\n"
         if p_links: content += "📄 PDFS & MATERIALS:\n" + "\n".join(p_links) + "\n\n"
         if v_links: content += "🎥 VIDEOS:\n" + "\n".join(v_links)
-            
+        
+        if not v_links and not p_links:
+            content += "❌ No content found! (APIs returned empty lists)"
+
         with open(filename, "w", encoding="utf-8") as f:
             f.write(content)
             
@@ -392,4 +418,4 @@ if __name__ == "__main__":
     
     print("🤖 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
-
+            
