@@ -36,7 +36,6 @@ async def run_web_server():
 # --- API LOGIC ---
 class SelectionWayBot:
     def __init__(self):
-        # Vercel apps are usually more lenient with headers
         self.base_headers = {
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "content-type": "application/json"
@@ -48,39 +47,54 @@ class SelectionWayBot:
         return url.replace(" ", "%")
 
     async def get_all_batches(self):
-        """Fetch all batches from the new Vercel API"""
-        url = "https://selection-way.vercel.app/batches"
+        """
+        Robust strategy:
+        1. Try Vercel API
+        2. If that fails/bad format -> Fallback to Backend API
+        """
+        # --- ATTEMPT 1: VERCEL ---
         try:
-            # Note: No custom headers needed for public vercel apps usually
-            response = requests.get(url, headers=self.base_headers)
-            
-            try:
-                data = response.json()
-            except ValueError:
-                return False, f"Server Error: {response.status_code} (Not JSON)"
+            url = "https://selection-way.vercel.app/batches"
+            resp = requests.get(url, headers=self.base_headers, timeout=10)
+            data = resp.json()
 
-            # Handle different potential JSON structures
-            # Case 1: Standard wrapper { state: 200, data: [...] }
-            if isinstance(data, dict) and data.get("state") == 200:
-                return True, data.get("data", [])
-            
-            # Case 2: Direct list [...]
-            elif isinstance(data, list):
-                return True, data
-                
-            # Case 3: Wrapped in 'data' key but no state
-            elif isinstance(data, dict) and "data" in data:
+            # Check 1: Wrapper with 'state' (int or str)
+            if "state" in data and str(data["state"]) == "200" and "data" in data:
                 return True, data["data"]
-
-            return False, "Unknown JSON structure from /batches"
+            
+            # Check 2: Direct List
+            if isinstance(data, list):
+                return True, data
+            
+            # Check 3: Wrapper with just 'data' key
+            if isinstance(data, dict) and "data" in data:
+                return True, data["data"]
+                
+            logger.warning(f"Vercel structure unknown. Keys found: {list(data.keys())}")
+            # If we reach here, Vercel format is weird. Proceed to fallback.
+            
         except Exception as e:
-            return False, f"Error: {str(e)}"
+            logger.error(f"Vercel API connection failed: {e}")
+
+        # --- ATTEMPT 2: BACKEND FALLBACK (Reliable) ---
+        try:
+            url = "https://backend.multistreaming.site/api/courses/"
+            headers = {
+                "host": "backend.multistreaming.site",
+                **self.base_headers
+            }
+            resp = requests.get(url, headers=headers, timeout=10)
+            data = resp.json()
+            
+            if str(data.get("state")) == "200":
+                return True, data["data"]
+                
+        except Exception as e:
+            return False, f"All APIs failed. Last Error: {e}"
+
+        return False, "Failed to fetch batches from both sources."
 
     async def get_my_batches(self, user_id):
-        """
-        Kept fallback to original API for 'My Batches' 
-        since the Vercel app might be public-only.
-        """
         if user_id not in self.user_sessions:
             return False, "Please login first"
         
@@ -111,7 +125,7 @@ class SelectionWayBot:
         url = "https://selectionway.hranker.com/admin/api/user-login"
         headers = {
             "host": "selectionway.hranker.com",
-             "origin": "https://www.selectionway.com",
+            "origin": "https://www.selectionway.com",
             "referer": "https://www.selectionway.com/",
             **self.base_headers
         }
@@ -124,7 +138,6 @@ class SelectionWayBot:
             session = requests.Session()
             resp = session.post(url, headers=headers, json=payload)
             data = resp.json()
-            
             if data.get("state") == 200:
                 self.user_sessions[user_id] = {
                     'user_id': data["data"]["user_id"],
@@ -138,51 +151,49 @@ class SelectionWayBot:
 
     async def extract_batch_data(self, batch_id, type="full"):
         """
-        Uses the new Vercel endpoints:
-        type='full'  -> /batch/{id}/full
-        type='today' -> /batch/{id}/today
+        Fetches from Vercel: /batch/{id}/full or /batch/{id}/today
         """
         url = f"https://selection-way.vercel.app/batch/{batch_id}/{type}"
         try:
             response = requests.get(url, headers=self.base_headers)
-            
             try:
                 json_data = response.json()
             except ValueError:
                 return False, f"Server returned HTML/Invalid JSON ({response.status_code})"
-                
             return True, json_data
         except Exception as e:
             return False, f"Connection Error: {str(e)}"
 
     def process_content(self, data):
         """
-        Smart parser that handles both Original Complex Structure
-        AND Simplified structures often returned by proxy APIs.
+        Recursive link extractor to handle any JSON structure
         """
         video_links = []
         pdf_links = []
         
-        # --- Helper to recursively find links if structure is unknown ---
         def find_links_recursive(item, context=""):
             if isinstance(item, dict):
-                # Check for Video URL keys
                 title = item.get("title", "Untitled")
                 
-                # Direct Video Link
-                if "url" in item and ".mp4" in str(item["url"]):
-                     video_links.append(f"{context} {title} -> {item['url']}")
-                elif "class_link" in item and item["class_link"]:
-                     video_links.append(f"{context} {title} -> {item['class_link']}")
+                # Check for direct links
+                url = item.get("url") or item.get("class_link") or item.get("materialLink")
                 
-                # Direct PDF Link
-                if "url" in item and ".pdf" in str(item["url"]):
-                     pdf_links.append(f"{context} {title} -> {item['url']}")
-                elif "materialLink" in item and item["materialLink"]:
-                     pdf_links.append(f"{context} {title} -> {item['materialLink']}")
+                if url:
+                    clean_link = self.clean_url(url)
+                    # Categorize by extension
+                    if ".pdf" in str(url).lower():
+                        pdf_links.append(f"{context} {title} -> {clean_link}")
+                    elif ".mp4" in str(url).lower() or "youtube" in str(url).lower() or "vimeo" in str(url).lower():
+                        video_links.append(f"{context} {title} -> {clean_link}")
+                    else:
+                        # Fallback: assume video if class_link, pdf if materialLink
+                        if item.get("materialLink"):
+                            pdf_links.append(f"{context} {title} -> {clean_link}")
+                        else:
+                            video_links.append(f"{context} {title} -> {clean_link}")
 
-                # Original 'mp4Recordings' structure
-                if "mp4Recordings" in item:
+                # Check for mp4Recordings list
+                if "mp4Recordings" in item and isinstance(item["mp4Recordings"], list):
                     best_url = ""
                     quality_tag = ""
                     for q in ["720p", "480p", "360p"]:
@@ -192,10 +203,11 @@ class SelectionWayBot:
                                 quality_tag = q
                                 break
                         if best_url: break
+                    
                     if best_url:
-                        video_links.append(f"{title} ({quality_tag}) -> {best_url}")
+                        video_links.append(f"{title} ({quality_tag}) -> {self.clean_url(best_url)}")
 
-                # Recurse deeper
+                # Recurse
                 for key, value in item.items():
                     if isinstance(value, (dict, list)):
                         find_links_recursive(value, context)
@@ -204,13 +216,11 @@ class SelectionWayBot:
                 for sub_item in item:
                     find_links_recursive(sub_item, context)
 
-        # Start extraction
-        # If the API returns { "data": ... }, unwrap it
+        # Handle wrapper
         work_data = data.get("data", data) if isinstance(data, dict) else data
-        
         find_links_recursive(work_data)
         
-        # Deduplicate list
+        # Remove duplicates
         return list(set(video_links)), list(set(pdf_links))
 
 bot_logic = SelectionWayBot()
@@ -230,27 +240,28 @@ def generate_page_text(batches, page, list_type):
     end_idx = start_idx + ITEMS_PER_PAGE
     current_batch = batches[start_idx:end_idx]
     
-    title = "📚 *Public Batches (Vercel API)*" if list_type == "all" else "🔐 *Your Purchased Batches*"
+    title = "📚 *Public Batches*" if list_type == "all" else "🔐 *Your Purchased Batches*"
     msg = f"{title}\n\n"
     
     for i, course in enumerate(current_batch, 1):
         actual_index = start_idx + i
-        c_title = course.get('title', course.get('courseName', 'Unknown'))
-        c_id = course.get('id', course.get('_id', 'N/A'))
+        # Handle inconsistent keys (title vs courseName, id vs _id)
+        c_title = course.get('title') or course.get('courseName') or "Unknown Course"
+        c_id = course.get('id') or course.get('_id') or "N/A"
         msg += f"*{actual_index}. {c_title}*\n   🆔 `{c_id}`\n\n"
     
-    msg += "👉 Reply with *Batch ID* to Extract Full Content.\n"
-    msg += "👉 Or type `/today <BatchID>` for today's updates."
+    msg += "👉 Reply with *Batch ID* (e.g., `68ce...`) for Full Extraction.\n"
+    msg += "👉 Type `/today <BatchID>` for Today's Updates."
     return msg
 
 # --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🔐 Login & My Batches", callback_data="login_menu")],
-        [InlineKeyboardButton("📚 Public Batches (New API)", callback_data="public_menu")]
+        [InlineKeyboardButton("📚 Public Batches", callback_data="public_menu")]
     ]
     await update.message.reply_text(
-        "🤖 *SelectionWay Vercel Downloader*\n\nSelect an option:",
+        "🤖 *SelectionWay Downloader*\n\nSelect an option:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -265,7 +276,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔐 *Login Required*\nSend: `email:password`", parse_mode='Markdown')
         
     elif data == "public_menu":
-        await query.edit_message_text("🔄 Fetching from Vercel API...")
+        await query.edit_message_text("🔄 Fetching batches...")
         success, batches = await bot_logic.get_all_batches()
         if success:
             context.user_data['public_batches'] = batches
@@ -282,7 +293,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = int(page_num)
         batches = context.user_data.get('public_batches' if list_type == "all" else 'my_batches', [])
         if not batches:
-            await query.answer("Session expired.", show_alert=True)
+            await query.answer("Session expired. /start again.", show_alert=True)
             return
         total_pages = math.ceil(len(batches) / ITEMS_PER_PAGE)
         text = generate_page_text(batches, page, list_type)
@@ -320,7 +331,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     # Extraction Flow
     else:
-        # Check if it's a command for Today's updates
         if text.startswith("/today"):
             parts = text.split()
             if len(parts) > 1:
@@ -330,10 +340,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Usage: `/today <BatchID>`")
             return
 
-        # Normal extraction (Full)
         mode = context.user_data.get('mode')
         
-        # Helper to find name from cache
+        # Try to find name in cache
         batch_name = "Unknown Batch"
         
         if mode == 'private' and text.isdigit():
@@ -346,17 +355,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Invalid index.")
         
         else:
-            # Assume it's a Batch ID (Public or Private)
-            # Try to find name in public cache if available
+            # Assume it's a Batch ID
             for b in context.user_data.get('public_batches', []):
-                if str(b.get('id')) == str(text) or str(b.get('_id')) == str(text):
+                # Check both 'id' and '_id'
+                bid = str(b.get('id') or b.get('_id') or "")
+                if bid == str(text):
                     batch_name = b.get('title', 'Batch')
                     break
             
-            if len(text) > 5:
+            if len(text) > 4: # Simple length check for ID
                 await process_extraction(update, text, batch_name, extraction_type="full")
             else:
-                await update.message.reply_text("⚠️ Send a valid **Batch ID** to extract full content.\nOr use `/today <BatchID>`.")
+                await update.message.reply_text("⚠️ Send a valid **Batch ID** (e.g. 68ce...) to extract full content.\nOr use `/today <BatchID>`.")
 
 async def process_extraction(update, batch_id, batch_name, extraction_type="full"):
     type_str = "Full Content" if extraction_type == "full" else "Today's Updates"
@@ -382,7 +392,7 @@ async def process_extraction(update, batch_id, batch_name, extraction_type="full
             content += "🎥 VIDEOS:\n" + "-"*30 + "\n" + "\n".join(v_links)
             
         if not p_links and not v_links:
-            content += "❌ No content found in this batch/section."
+            content += "❌ No content found.\n(Empty response from Vercel API)"
 
         with open(filename, "w", encoding="utf-8") as f:
             f.write(content)
