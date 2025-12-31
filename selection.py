@@ -8,6 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # --- CONFIGURATION ---
+# Get Token from Koyeb Environment Variables, or use default if testing locally
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
 PORT = int(os.environ.get("PORT", "8000"))
 ITEMS_PER_PAGE = 10
@@ -49,10 +50,8 @@ class SelectionWayBot:
         return url.replace(" ", "%")
 
     async def get_all_batches(self):
-        """Get all active batches (Fixed limit=100)"""
-        # Note the indentation here (8 spaces)
+        """Get all active batches"""
         url = "https://backend.multistreaming.site/api/courses/"
-        
         headers = {
             "host": "backend.multistreaming.site",
             **self.base_headers
@@ -121,6 +120,7 @@ class SelectionWayBot:
             return False, f"❌ Login error: {str(e)}"
 
     async def extract_course_data(self, user_id, course_id, course_name, is_public=True):
+        """Extracts both Videos AND PDFs now"""
         try:
             session = requests.Session()
             if not is_public:
@@ -129,24 +129,32 @@ class SelectionWayBot:
                 else:
                     return False, "Login expired or required."
 
-            pdf_url = ""
-            classes_url = f"https://backend.multistreaming.site/api/courses/{course_id}/classes?populate=full"
             headers = {"host": "backend.multistreaming.site", **self.base_headers}
+
+            # 1. Fetch Video Classes
+            classes_url = f"https://backend.multistreaming.site/api/courses/{course_id}/classes?populate=full"
+            resp_cls = session.get(classes_url, headers=headers)
+            classes_json = resp_cls.json()
             
-            resp = session.get(classes_url, headers=headers)
-            classes_data = resp.json()
+            # 2. Fetch PDFs / Study Materials (ADDED FROM CONFIG 2)
+            pdfs_url = f"https://backend.multistreaming.site/api/courses/{course_id}/study-materials"
+            resp_pdf = session.get(pdfs_url, headers=headers)
+            pdfs_json = resp_pdf.json()
+
+            # 3. Get Batch Info PDF (from public list or cache)
+            batch_pdf_url = ""
+            if is_public:
+                _, all_batches = await self.get_all_batches()
+                for b in all_batches:
+                    if str(b.get('id')) == str(course_id):
+                        batch_pdf_url = b.get('batchInfoPdfUrl', "")
+                        break
             
-            if classes_data.get("state") == 200:
-                if is_public:
-                    _, all_batches = await self.get_all_batches()
-                    for b in all_batches:
-                        if b.get('id') == course_id:
-                            pdf_url = b.get('batchInfoPdfUrl', "")
-                            break
-                
+            if classes_json.get("state") == 200:
                 return True, {
-                    "classes_data": classes_data["data"],
-                    "pdf_url": self.clean_url(pdf_url),
+                    "classes_data": classes_json.get("data"),
+                    "pdfs_data": pdfs_json.get("data", []) if pdfs_json.get("state") == 200 else [],
+                    "batch_pdf_url": self.clean_url(batch_pdf_url),
                     "course_name": course_name
                 }
             return False, "Failed to get class data"
@@ -158,9 +166,20 @@ class SelectionWayBot:
         video_links = []
         pdf_links = []
         
-        if data.get("pdf_url"):
-            pdf_links.append(f"Batch Info PDF: {data['pdf_url']}")
+        # 1. Process Batch Info PDF
+        if data.get("batch_pdf_url"):
+            pdf_links.append(f"Batch Info PDF -> {data['batch_pdf_url']}")
+
+        # 2. Process Study Material PDFs (ADDED FROM CONFIG 2)
+        if data.get("pdfs_data"):
+            for pdf in data["pdfs_data"]:
+                title = pdf.get("title", "Unknown PDF")
+                # Try getting materialLink first, then fallback to url
+                url = pdf.get("materialLink") or pdf.get("url")
+                if url:
+                    pdf_links.append(f"{title} -> {self.clean_url(url)}")
             
+        # 3. Process Videos
         if data.get("classes_data") and "classes" in data["classes_data"]:
             for topic in data["classes_data"]["classes"]:
                 for cls in topic.get("classes", []):
@@ -178,7 +197,7 @@ class SelectionWayBot:
                         if best_url and quality_tag == q: break
                     
                     if best_url:
-                        video_links.append(f"{title} ({quality_tag}): {best_url}")
+                        video_links.append(f"{title} ({quality_tag}) -> {self.clean_url(best_url)}")
                         
         return video_links, pdf_links
 
@@ -314,20 +333,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Invalid number.")
 
         elif mode == 'public':
-            if len(text) > 10: 
+            if len(text) > 5: 
                 name = "Unknown Course"
                 for b in context.user_data.get('public_batches', []):
-                    if b['id'] == text:
+                    if str(b['id']) == str(text):
                         name = b['title']
                         break
                 await process_extraction(update, user_id, text, name, is_public=True)
             else:
-                await update.message.reply_text("❌ For public batches, please reply with the exact **Batch ID** (long code).", parse_mode='Markdown')
+                await update.message.reply_text("❌ For public batches, please reply with the exact **Batch ID**.", parse_mode='Markdown')
         else:
             await update.message.reply_text("⚠️ Please select an option from /start first.")
 
 async def process_extraction(update, user_id, course_id, course_name, is_public):
-    status_msg = await update.message.reply_text(f"🔄 Extracting *{course_name}*...", parse_mode='Markdown')
+    status_msg = await update.message.reply_text(f"🔄 Extracting Videos & PDFs for *{course_name}*...", parse_mode='Markdown')
     success, data = await bot_logic.extract_course_data(user_id, course_id, course_name, is_public)
     
     if success:
@@ -335,10 +354,23 @@ async def process_extraction(update, user_id, course_id, course_name, is_public)
         safe_name = "".join(c for c in course_name if c.isalnum() or c in (' ', '-', '_')).strip()
         filename = f"{safe_name}.txt"
         
-        content = f"🎯 {course_name}\n\n"
-        if p_links: content += "📄 PDFS:\n" + "\n".join(p_links) + "\n\n"
-        if v_links: content += "🎥 VIDEOS:\n" + "\n".join(v_links)
+        content = f"🎯 {course_name}\n"
+        content += f"🆔 Batch ID: {course_id}\n"
+        content += "="*40 + "\n\n"
+        
+        if p_links: 
+            content += "📄 PDFS & STUDY MATERIALS:\n" 
+            content += "-"*30 + "\n"
+            content += "\n".join(p_links) + "\n\n"
+        
+        if v_links: 
+            content += "🎥 VIDEOS:\n" 
+            content += "-"*30 + "\n"
+            content += "\n".join(v_links)
             
+        if not p_links and not v_links:
+            content += "❌ No content found for this batch."
+
         with open(filename, "w", encoding="utf-8") as f:
             f.write(content)
             
@@ -356,12 +388,14 @@ async def process_extraction(update, user_id, course_id, course_name, is_public)
 
 if __name__ == "__main__":
     if not BOT_TOKEN or "YOUR_BOT_TOKEN_HERE" in BOT_TOKEN:
-        print("⚠️ Warning: BOT_TOKEN is missing or default. Make sure it's set in Koyeb Envs.")
+        print("⚠️ Warning: BOT_TOKEN is missing. Make sure it's set in Koyeb Envs.")
     
+    # Create webserver loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(run_web_server())
 
+    # Start Bot
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -369,5 +403,3 @@ if __name__ == "__main__":
     
     print("🤖 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
-    
-
