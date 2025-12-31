@@ -8,7 +8,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # --- CONFIGURATION ---
-# Get Token from Koyeb Environment Variables, or use default if testing locally
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
 PORT = int(os.environ.get("PORT", "8000"))
 ITEMS_PER_PAGE = 10
@@ -60,9 +59,12 @@ class SelectionWayBot:
         try:
             session = requests.Session()
             response = session.get(url, headers=headers)
-            response.raise_for_status()
             
-            courses_response = response.json()
+            try:
+                courses_response = response.json()
+            except ValueError:
+                return False, f"Server Error: {response.status_code}"
+
             if courses_response.get("state") == 200:
                 data = courses_response["data"]
                 return True, data
@@ -84,7 +86,11 @@ class SelectionWayBot:
         
         try:
             resp = user_data['session'].post(url, headers=headers, json=payload)
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                return False, "API Error: Invalid JSON response"
+
             if str(data.get("state")) == "200":
                 flat_list = []
                 for group in data.get("data", []):
@@ -106,7 +112,10 @@ class SelectionWayBot:
         try:
             session = requests.Session()
             resp = session.post(url, headers=headers, json=payload)
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                return False, "Login API Error (Invalid JSON)"
             
             if data.get("state") == 200:
                 self.user_sessions[user_id] = {
@@ -120,7 +129,11 @@ class SelectionWayBot:
             return False, f"❌ Login error: {str(e)}"
 
     async def extract_course_data(self, user_id, course_id, course_name, is_public=True):
-        """Extracts both Videos AND PDFs now"""
+        """
+        Robust extraction:
+        1. Tries to get Videos (Critical)
+        2. Tries to get PDFs (Optional - ignores errors if missing)
+        """
         try:
             session = requests.Session()
             if not is_public:
@@ -131,33 +144,58 @@ class SelectionWayBot:
 
             headers = {"host": "backend.multistreaming.site", **self.base_headers}
 
-            # 1. Fetch Video Classes
+            # 1. Fetch Video Classes (MUST SUCCEED)
             classes_url = f"https://backend.multistreaming.site/api/courses/{course_id}/classes?populate=full"
             resp_cls = session.get(classes_url, headers=headers)
-            classes_json = resp_cls.json()
             
-            # 2. Fetch PDFs / Study Materials (ADDED FROM CONFIG 2)
-            pdfs_url = f"https://backend.multistreaming.site/api/courses/{course_id}/study-materials"
-            resp_pdf = session.get(pdfs_url, headers=headers)
-            pdfs_json = resp_pdf.json()
+            classes_json = {}
+            try:
+                classes_json = resp_cls.json()
+            except ValueError:
+                # If videos fail to parse, we can't do anything
+                return False, f"Video API Error: {resp_cls.status_code}"
+            
+            # 2. Fetch PDFs (OPTIONAL - Handle 404/HTML errors gracefully)
+            pdfs_data = []
+            try:
+                pdfs_url = f"https://backend.multistreaming.site/api/courses/{course_id}/study-materials"
+                resp_pdf = session.get(pdfs_url, headers=headers)
+                
+                # Only try to parse if status is 200, otherwise assume no PDFs
+                if resp_pdf.status_code == 200:
+                    try:
+                        pdf_json = resp_pdf.json()
+                        if pdf_json.get("state") == 200:
+                            pdfs_data = pdf_json.get("data", [])
+                    except ValueError:
+                        pass # JSON error on PDFs -> Ignore
+            except Exception:
+                pass # Any connection error on PDFs -> Ignore
 
-            # 3. Get Batch Info PDF (from public list or cache)
+            # 3. Get Batch Info PDF (from public list cache)
             batch_pdf_url = ""
             if is_public:
-                _, all_batches = await self.get_all_batches()
-                for b in all_batches:
-                    if str(b.get('id')) == str(course_id):
-                        batch_pdf_url = b.get('batchInfoPdfUrl', "")
-                        break
+                try:
+                    # We reuse the get_all_batches logic but don't let it crash this function
+                    url = "https://backend.multistreaming.site/api/courses/"
+                    r = session.get(url, headers=headers)
+                    d = r.json()
+                    if d.get("state") == 200:
+                        for b in d["data"]:
+                            if str(b.get('id')) == str(course_id):
+                                batch_pdf_url = b.get('batchInfoPdfUrl', "")
+                                break
+                except:
+                    pass
             
             if classes_json.get("state") == 200:
                 return True, {
                     "classes_data": classes_json.get("data"),
-                    "pdfs_data": pdfs_json.get("data", []) if pdfs_json.get("state") == 200 else [],
+                    "pdfs_data": pdfs_data,
                     "batch_pdf_url": self.clean_url(batch_pdf_url),
                     "course_name": course_name
                 }
-            return False, "Failed to get class data"
+            return False, "Failed to get class data (API State != 200)"
         except Exception as e:
             logger.error(e)
             return False, f"Error: {str(e)}"
@@ -170,11 +208,10 @@ class SelectionWayBot:
         if data.get("batch_pdf_url"):
             pdf_links.append(f"Batch Info PDF -> {data['batch_pdf_url']}")
 
-        # 2. Process Study Material PDFs (ADDED FROM CONFIG 2)
+        # 2. Process Study Material PDFs
         if data.get("pdfs_data"):
             for pdf in data["pdfs_data"]:
                 title = pdf.get("title", "Unknown PDF")
-                # Try getting materialLink first, then fallback to url
                 url = pdf.get("materialLink") or pdf.get("url")
                 if url:
                     pdf_links.append(f"{title} -> {self.clean_url(url)}")
@@ -403,3 +440,4 @@ if __name__ == "__main__":
     
     print("🤖 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
+
