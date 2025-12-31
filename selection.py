@@ -1,19 +1,16 @@
 import requests
 import logging
 import os
-import math
 import asyncio
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
 PORT = int(os.environ.get("PORT", "8000"))
-ITEMS_PER_PAGE = 10
 
-# --- API ENDPOINTS ---
-COURSES_API = "https://backend.multistreaming.site/api/courses/"
+# --- THE ONLY API ---
 CLASSES_API = "https://backend.multistreaming.site/api/courses/{course_id}/classes?populate=full"
 
 # --- LOGGING ---
@@ -23,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- WEB SERVER FOR KOYEB (KEEP ALIVE) ---
+# --- WEB SERVER (Keep Alive) ---
 async def health_check(request):
     return web.Response(text="Bot is alive!", status=200)
 
@@ -36,7 +33,7 @@ async def run_web_server():
     await site.start()
     logger.info(f"🕸️ Web server started on port {PORT}")
 
-# --- API LOGIC ---
+# --- BOT LOGIC ---
 class SelectionWayBot:
     def __init__(self):
         self.base_headers = {
@@ -52,47 +49,8 @@ class SelectionWayBot:
         if not url: return ""
         return url.strip().replace(" ", "%20")
 
-    async def get_all_batches(self):
-        """Get all active batches"""
-        url = COURSES_API
-        headers = {"host": "backend.multistreaming.site", **self.base_headers}
-        
-        try:
-            session = requests.Session()
-            response = session.get(url, headers=headers)
-            response.raise_for_status()
-            courses_response = response.json()
-            if courses_response.get("state") == 200:
-                return True, courses_response["data"]
-            else:
-                return False, "Failed to get batches"
-        except Exception as e:
-            return False, f"Error: {str(e)}"
-
-    async def get_my_batches(self, user_id):
-        """Get user's own batches"""
-        if user_id not in self.user_sessions:
-            return False, "Please login first"
-        
-        user_data = self.user_sessions[user_id]
-        url = "https://backend.multistreaming.site/api/courses/my-courses"
-        headers = {"host": "backend.multistreaming.site", **self.base_headers}
-        payload = {"userId": str(user_data['user_id'])}
-        
-        try:
-            resp = user_data['session'].post(url, headers=headers, json=payload)
-            data = resp.json()
-            if str(data.get("state")) == "200":
-                flat_list = []
-                for group in data.get("data", []):
-                    flat_list.extend(group.get("liveCourses", []))
-                    flat_list.extend(group.get("recordedCourses", []))
-                return True, flat_list
-            return False, "Failed to get your courses"
-        except Exception as e:
-            return False, f"Error: {str(e)}"
-
     async def login_user(self, email, password, user_id):
+        """Kept only for generating tokens for private courses"""
         url = "https://selectionway.hranker.com/admin/api/user-login"
         headers = {"host": "selectionway.hranker.com", **self.base_headers}
         payload = {
@@ -111,45 +69,35 @@ class SelectionWayBot:
                     'token': data["data"]["token_id"],
                     'session': session
                 }
-                return True, "✅ Login successful!"
-            return False, "❌ Login failed: Invalid credentials"
+                return True, "✅ Login successful! Now send me a Course ID."
+            return False, "❌ Login failed."
         except Exception as e:
             return False, f"❌ Login error: {str(e)}"
 
-    async def extract_course_data(self, user_id, course_id, course_name, is_public=True):
+    async def extract_course_data(self, user_id, course_id):
         try:
+            # Determine session (User or Guest)
             session = requests.Session()
-            if not is_public:
-                if user_id in self.user_sessions:
-                    session = self.user_sessions[user_id]['session']
-                else:
-                    return False, "Login expired or required."
+            if user_id in self.user_sessions:
+                session = self.user_sessions[user_id]['session']
 
             headers = {"host": "backend.multistreaming.site", **self.base_headers}
-
-            # 1. Fetch Classes (Contains Videos AND Class Notes)
-            classes_url = CLASSES_API.format(course_id=course_id)
-            resp_classes = session.get(classes_url, headers=headers)
-            classes_data = resp_classes.json()
             
-            if classes_data.get("state") == 200:
-                # 2. Try to get Batch Info PDF (Syllabus etc)
-                batch_info_pdf = ""
-                if is_public:
-                    try:
-                        _, all_batches = await self.get_all_batches()
-                        for b in all_batches:
-                            if str(b.get('id')) == str(course_id):
-                                batch_info_pdf = b.get('batchInfoPdfUrl', "")
-                                break
-                    except: pass
-                
-                return True, {
-                    "classes_data": classes_data.get("data", {}),
-                    "batch_info_pdf": self.clean_url(batch_info_pdf),
-                    "course_name": course_name
-                }
-            return False, "Failed to get class data"
+            # THE ONLY API CALL
+            url = CLASSES_API.format(course_id=course_id)
+            resp = session.get(url, headers=headers)
+            
+            # Check for JSON validity
+            try:
+                data = resp.json()
+            except:
+                return False, "API did not return JSON. Invalid ID?"
+
+            if data.get("state") == 200:
+                return True, data.get("data", {})
+            else:
+                return False, f"API Error: {data.get('message', 'Unknown error')}"
+
         except Exception as e:
             logger.error(e)
             return False, f"Error: {str(e)}"
@@ -158,17 +106,13 @@ class SelectionWayBot:
         video_links = []
         pdf_links = []
         
-        # 1. Add Batch Info PDF
-        if data.get("batch_info_pdf"):
-            pdf_links.append(f"ℹ️ Batch Info: {data['batch_info_pdf']}")
-
-        # 2. Process Classes
-        if data.get("classes_data") and "classes" in data["classes_data"]:
-            for topic in data["classes_data"]["classes"]:
+        # Go through classes
+        if data and "classes" in data:
+            for topic in data["classes"]:
                 for cls in topic.get("classes", []):
                     title = cls.get("title", "Unknown Class")
                     
-                    # --- A. Extract VIDEO ---
+                    # 1. Extract VIDEO
                     best_video_url = cls.get("class_link", "")
                     quality_tag = "Link"
                     
@@ -184,19 +128,17 @@ class SelectionWayBot:
                     if best_video_url:
                         video_links.append(f"{title} ({quality_tag}): {self.clean_url(best_video_url)}")
 
-                    # --- B. Extract PDF/NOTES (Smart Scan) ---
-                    # Scan ALL keys in the dictionary for valid PDF urls
+                    # 2. Extract PDF (Smart Scan)
                     found_pdf = None
                     
-                    # 1. Check all string values in the class object
+                    # Scan all string keys for ".pdf" or "/pdfs/"
                     for key, val in cls.items():
                         if isinstance(val, str) and val.startswith("http"):
-                            # Check if it ends in .pdf OR contains /pdfs/ (like your example)
                             if val.lower().endswith(".pdf") or "/pdfs/" in val:
                                 found_pdf = val
                                 break
                     
-                    # 2. Check inside 'attachments' array if direct key fail
+                    # Check attachments array
                     if not found_pdf and "attachments" in cls:
                         for att in cls["attachments"]:
                             url = att.get("url", "")
@@ -211,169 +153,58 @@ class SelectionWayBot:
 
 bot_logic = SelectionWayBot()
 
-# --- PAGINATION HELPERS ---
-def get_batches_keyboard(current_page, total_pages, list_type):
-    buttons = []
-    if current_page > 1:
-        buttons.append(InlineKeyboardButton("<< Prev", callback_data=f"page|{list_type}|{current_page-1}"))
-    buttons.append(InlineKeyboardButton(f"{current_page}/{total_pages}", callback_data="noop"))
-    if current_page < total_pages:
-        buttons.append(InlineKeyboardButton("Next >>", callback_data=f"page|{list_type}|{current_page+1}"))
-    return InlineKeyboardMarkup([buttons])
-
-def generate_page_text(batches, page, list_type):
-    start_idx = (page - 1) * ITEMS_PER_PAGE
-    end_idx = start_idx + ITEMS_PER_PAGE
-    current_batch = batches[start_idx:end_idx]
-    
-    title = "📚 *All Available Batches*" if list_type == "all" else "🔐 *Your Purchased Batches*"
-    msg = f"{title}\n\n"
-    
-    for i, course in enumerate(current_batch, 1):
-        actual_index = start_idx + i
-        price = course.get('discountPrice', course.get('price', 'N/A'))
-        msg += f"*{actual_index}. {course.get('title')}*\n"
-        msg += f"   🆔 `{course.get('id')}` | 💰 ₹{price}\n\n"
-    
-    if list_type == "my":
-        msg += "👉 Reply with *Index Number* (e.g., `1`, `15`) to extract."
-    else:
-        msg += "👉 Reply with *Batch ID* to extract."
-        
-    return msg
-
 # --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔐 Login & My Batches", callback_data="login_menu")],
-        [InlineKeyboardButton("📚 Public Batches", callback_data="public_menu")]
-    ]
     await update.message.reply_text(
-        "🤖 *SelectionWay Downloader*\n\nSelect an option below:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "🤖 *Simple Course Extractor*\n\n"
+        "1. Send me a **Course ID** to extract.\n"
+        "2. To login (for paid courses), send: `/login email password`",
         parse_mode='Markdown'
     )
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "login_menu":
-        context.user_data['awaiting_login'] = True
-        await query.edit_message_text(
-            "🔐 *Login Required*\nSend details as: `email:password`\nExample: `user@gmail.com:pass123`",
-            parse_mode='Markdown'
-        )
-        
-    elif data == "public_menu":
-        await query.edit_message_text("🔄 Fetching batches...")
-        success, batches = await bot_logic.get_all_batches()
-        if success:
-            context.user_data['public_batches'] = batches
-            context.user_data['mode'] = 'public'
-            total_pages = math.ceil(len(batches) / ITEMS_PER_PAGE)
-            text = generate_page_text(batches, 1, "all")
-            kb = get_batches_keyboard(1, total_pages, "all")
-            await query.edit_message_text(text, reply_markup=kb, parse_mode='Markdown')
-        else:
-            await query.edit_message_text(f"❌ Error: {batches}")
-
-    elif data.startswith("page|"):
-        _, list_type, page_num = data.split("|")
-        page = int(page_num)
-        
-        batches = []
-        if list_type == "all":
-            batches = context.user_data.get('public_batches', [])
-        else:
-            batches = context.user_data.get('my_batches', [])
-            
-        if not batches:
-            await query.answer("Session expired. Please reload.", show_alert=True)
-            return
-
-        total_pages = math.ceil(len(batches) / ITEMS_PER_PAGE)
-        text = generate_page_text(batches, page, list_type)
-        kb = get_batches_keyboard(page, total_pages, list_type)
-        
-        try:
-            await query.edit_message_text(text, reply_markup=kb, parse_mode='Markdown')
-        except Exception:
-            pass
+async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    args = context.args
+    if len(args) != 2:
+        await update.message.reply_text("❌ Usage: `/login email password`")
+        return
+    
+    email, password = args
+    msg = await update.message.reply_text("🔄 Logging in...")
+    success, text = await bot_logic.login_user(email, password, user_id)
+    await msg.edit_text(text)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
     
-    if context.user_data.get('awaiting_login'):
-        if ":" in text:
-            email, password = text.split(":", 1)
-            msg = await update.message.reply_text("🔄 Verifying credentials...")
-            success, resp = await bot_logic.login_user(email.strip(), password.strip(), user_id)
-            if success:
-                context.user_data['awaiting_login'] = False
-                await msg.edit_text("✅ Login Success! Fetching your batches...")
-                ok, batches = await bot_logic.get_my_batches(user_id)
-                if ok:
-                    context.user_data['my_batches'] = batches
-                    context.user_data['mode'] = 'private'
-                    total_pages = math.ceil(len(batches) / ITEMS_PER_PAGE)
-                    txt = generate_page_text(batches, 1, "my")
-                    kb = get_batches_keyboard(1, total_pages, "my")
-                    await update.message.reply_text(txt, reply_markup=kb, parse_mode='Markdown')
-                else:
-                    await update.message.reply_text(f"❌ Login ok, but failed to fetch batches: {batches}")
-            else:
-                await msg.edit_text(f"{resp}")
-        else:
-            await update.message.reply_text("❌ Invalid format. Use `email:password`")
-            
-    else:
-        mode = context.user_data.get('mode')
-        if mode == 'private' and text.isdigit():
-            idx = int(text)
-            batches = context.user_data.get('my_batches', [])
-            if 1 <= idx <= len(batches):
-                course = batches[idx-1]
-                await process_extraction(update, user_id, course['id'], course['title'], is_public=False)
-            else:
-                await update.message.reply_text("❌ Invalid number.")
+    # Assume any text sent is a Course ID
+    if len(text) < 5:
+        await update.message.reply_text("❌ ID seems too short.")
+        return
 
-        elif mode == 'public':
-            if len(text) > 10: 
-                name = "Unknown Course"
-                for b in context.user_data.get('public_batches', []):
-                    if b['id'] == text:
-                        name = b['title']
-                        break
-                await process_extraction(update, user_id, text, name, is_public=True)
-            else:
-                await update.message.reply_text("❌ For public batches, please reply with the exact **Batch ID** (long code).", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("⚠️ Please select an option from /start first.")
-
-async def process_extraction(update, user_id, course_id, course_name, is_public):
-    status_msg = await update.message.reply_text(f"🔄 Extracting *{course_name}*...", parse_mode='Markdown')
-    success, data = await bot_logic.extract_course_data(user_id, course_id, course_name, is_public)
+    status_msg = await update.message.reply_text(f"🔄 Checking ID: `{text}`...", parse_mode='Markdown')
+    
+    success, data = await bot_logic.extract_course_data(user_id, text)
     
     if success:
         v_links, p_links = bot_logic.process_content(data)
-        safe_name = "".join(c for c in course_name if c.isalnum() or c in (' ', '-', '_')).strip()
-        filename = f"{safe_name}.txt"
         
-        content = f"🎯 {course_name}\n\n"
+        # Use ID as filename since we might not get a clean course name easily
+        filename = f"Course_{text}.txt"
+        
+        content = f"🎯 Course ID: {text}\n\n"
         if p_links: content += "📄 PDFS & MATERIALS:\n" + "\n".join(p_links) + "\n\n"
         if v_links: content += "🎥 VIDEOS:\n" + "\n".join(v_links)
         
         if not v_links and not p_links:
-            content += "❌ No content found! (APIs returned empty lists)"
+            content += "❌ No content found! (Check if ID is correct or if you need to /login)"
 
         with open(filename, "w", encoding="utf-8") as f:
             f.write(content)
             
         caption = (f"✅ *Extraction Complete*\n"
-                   f"📁 {course_name}\n"
+                   f"🆔 `{text}`\n"
                    f"📹 Videos: {len(v_links)} | 📄 PDFs: {len(p_links)}")
                    
         with open(filename, "rb") as f:
@@ -386,7 +217,7 @@ async def process_extraction(update, user_id, course_id, course_name, is_public)
 
 if __name__ == "__main__":
     if not BOT_TOKEN or "YOUR_BOT_TOKEN_HERE" in BOT_TOKEN:
-        print("⚠️ Warning: BOT_TOKEN is missing or default. Make sure it's set in Koyeb Envs.")
+        print("⚠️ Warning: BOT_TOKEN is missing.")
     
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -394,9 +225,9 @@ if __name__ == "__main__":
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(CommandHandler("login", login_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     print("🤖 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
-
+    
