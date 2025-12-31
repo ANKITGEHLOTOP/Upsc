@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # ---------------- CONFIG ----------------
-# ⚠️ REPLACE THIS WITH YOUR NEW TOKEN FROM BOTFATHER
+# ⚠️ TOKEN REPLACEMENT (Make sure this is your latest token)
 BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"
 
 BASE_HEADERS = {
@@ -67,18 +67,27 @@ async def fetch_pdfs(session: aiohttp.ClientSession, course_id: str):
         logging.error(f"Error fetching PDFs: {e}")
     return []
 
-def extract_video_links(classes_data):
-    videos = []
+# --- UPDATED EXTRACTOR LOGIC ---
+def extract_content_from_classes(classes_data):
+    """Extracts BOTH Video links AND Class-attached PDFs (Board PDFs)"""
+    content_list = []
+    
     if not classes_data or "classes" not in classes_data:
-        return videos
+        return content_list
     
     for topic in classes_data["classes"]:
+        # Optional: Add Topic Header
+        topic_name = topic.get("title", "Unknown Topic")
+        # content_list.append(f"\n--- {topic_name} ---") 
+        
         for cls in topic.get("classes", []):
-            title = cls.get("title", "Unknown")
+            title = cls.get("title", "Unknown Class")
+            
+            # 1. EXTRACT VIDEO
             best_url = cls.get("class_link")
             quality = "link"
             
-            # Prioritize qualities
+            # Check different qualities
             for q in ["720p", "480p", "360p"]:
                 for rec in cls.get("mp4Recordings", []):
                     if rec.get("quality") == q:
@@ -89,22 +98,30 @@ def extract_video_links(classes_data):
                     break
             
             if best_url:
-                videos.append(f"{title} ({quality}) -> {clean_url(best_url)}")
-    return videos
+                content_list.append(f"🎥 {title} ({quality}) -> {clean_url(best_url)}")
 
-def extract_pdf_links(pdfs_data):
+            # 2. EXTRACT ATTACHED PDF (Board PDF / Notes)
+            # Checking multiple common keys where the PDF might be hidden
+            class_pdf = cls.get("note") or cls.get("attachment") or cls.get("pdf") or cls.get("material")
+            
+            if class_pdf:
+                content_list.append(f"📝 {title} (Board PDF) -> {clean_url(class_pdf)}")
+                
+    return content_list
+
+def extract_global_pdfs(pdfs_data):
+    """Extracts PDFs from the Study Materials section"""
     pdfs = []
     for pdf in pdfs_data:
         title = pdf.get("title", "Unknown PDF")
         url = pdf.get("materialLink") or pdf.get("url")
         if url:
-            pdfs.append(f"{title} -> {clean_url(url)}")
+            pdfs.append(f"📚 {title} -> {clean_url(url)}")
     return pdfs
 
 # ---------------- BOT HANDLERS ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message and lists available courses."""
     status_msg = await update.message.reply_text("📡 Fetching courses list...")
     
     headers = BASE_HEADERS.copy()
@@ -117,20 +134,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("❌ No courses found or API error.")
         return
 
-    # Store courses in context for easier lookup
     context.user_data['courses'] = {str(c['id']): c for c in courses}
     
     message_text = "📚 **Available Batches:**\n\n"
-    
     for c in courses:
         c_id = c.get('id')
         c_title = c.get('title')
-        # Use code block for ID so it's easy to copy
         message_text += f"ID: `{c_id}`\nName: {c_title}\n\n"
 
-    message_text += "👇 **Copy an ID from above and reply with it to extract.**"
+    message_text += "👇 **Reply with the Batch ID to extract.**"
     
-    # Split message if too long (Telegram limit 4096 chars)
     if len(message_text) > 4000:
         chunks = [message_text[i:i+4000] for i in range(0, len(message_text), 4000)]
         for chunk in chunks:
@@ -139,50 +152,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(message_text, parse_mode='Markdown')
 
 async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles text input (Course ID) and generates the file."""
     course_id = update.message.text.strip()
     
-    # FIXED: Removed isdigit() check to allow alphanumeric IDs
     if len(course_id) < 5: 
-        await update.message.reply_text("❌ ID seems too short. Please check.")
+        await update.message.reply_text("❌ ID too short.")
         return
 
-    status_msg = await update.message.reply_text(f"⏳ Processing Course ID: `{course_id}`...", parse_mode='Markdown')
+    status_msg = await update.message.reply_text(f"⏳ Processing ID: `{course_id}`...", parse_mode='Markdown')
 
     headers = BASE_HEADERS.copy()
     headers["host"] = "backend.multistreaming.site"
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        # 1. Get Course Info (try to look up title, else use ID)
+        # Get Title
         course_title = f"Batch_{course_id}"
         batch_pdf = None
-        
-        # Check if we have cached course data from /start
         courses_map = context.user_data.get('courses', {})
         if course_id in courses_map:
             course_obj = courses_map[course_id]
             course_title = course_obj.get('title', course_title)
             batch_pdf = course_obj.get('batchInfoPdfUrl')
         
-        # 2. Fetch Data
+        # Fetch Data
         classes_data, pdfs_data = await asyncio.gather(
             fetch_classes(session, course_id),
             fetch_pdfs(session, course_id)
         )
 
-        # 3. Process Data
-        video_links = extract_video_links(classes_data)
-        pdf_links = extract_pdf_links(pdfs_data)
+        # Extract
+        class_content_links = extract_content_from_classes(classes_data)
+        global_pdf_links = extract_global_pdfs(pdfs_data)
 
         if batch_pdf:
-            pdf_links.insert(0, f"Batch PDF -> {clean_url(batch_pdf)}")
+            global_pdf_links.insert(0, f"📕 Batch Brochure/PDF -> {clean_url(batch_pdf)}")
 
-        if not video_links and not pdf_links:
-            await status_msg.edit_text("❌ No content found for this ID. It might be empty or invalid.")
+        if not class_content_links and not global_pdf_links:
+            await status_msg.edit_text("❌ No content found.")
             return
 
-        # 4. Create In-Memory File
-        # Sanitize filename
+        # Create File
         safe_filename = "".join(c for c in course_title if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
         if not safe_filename: safe_filename = "course_data"
         
@@ -191,27 +199,25 @@ async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_buffer.write(f"ID: {course_id}\n")
         file_buffer.write("-" * 50 + "\n\n")
         
-        if video_links:
-            file_buffer.write("🎥 VIDEOS:\n")
+        if class_content_links:
+            file_buffer.write("🎬 CLASS VIDEOS & NOTES:\n")
             file_buffer.write("=" * 50 + "\n")
-            for link in video_links:
+            for link in class_content_links:
                 file_buffer.write(link + "\n\n")
         
-        if pdf_links:
-            file_buffer.write("📄 PDFs & MATERIALS:\n")
+        if global_pdf_links:
+            file_buffer.write("📚 OTHER STUDY MATERIALS:\n")
             file_buffer.write("=" * 50 + "\n")
-            for link in pdf_links:
+            for link in global_pdf_links:
                 file_buffer.write(link + "\n\n")
 
-        # Convert to bytes for Telegram
         file_buffer.seek(0)
         bytes_io = io.BytesIO(file_buffer.getvalue().encode('utf-8'))
         bytes_io.name = f"{safe_filename}.txt"
 
-        # 5. Send File
         await update.message.reply_document(
             document=bytes_io,
-            caption=f"✅ **Extraction Complete**\nfound {len(video_links)} videos and {len(pdf_links)} PDFs.",
+            caption=f"✅ **Extraction Complete**\nIncludes Videos & Class Notes (Board PDFs).",
             parse_mode='Markdown'
         )
         await status_msg.delete()
@@ -219,11 +225,8 @@ async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------- MAIN ----------------
 if __name__ == '__main__':
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_course_id))
-    
     print("🤖 Bot is running...")
     application.run_polling()
 
