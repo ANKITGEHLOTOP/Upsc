@@ -125,11 +125,10 @@ class SelectionWayBot:
             try:
                 classes_json = resp_cls.json()
             except:
-                pass # Ignore video errors to attempt PDFs
+                pass 
 
-            # 2. Fetch PDFs (UPDATED ENDPOINT BASED ON YOUR INSPECT ELEMENT)
-            # Using ?groupBy=topic to match browser behavior
-            pdfs_url = f"https://backend.multistreaming.site/api/courses/{course_id}/pdfs?groupBy=topic"
+            # 2. Fetch PDFs (UPDATED ENDPOINT AS REQUESTED)
+            pdfs_url = f"https://backend.multistreaming.site/api/courses/{course_id}/pdfs"
             pdfs_data = []
             try:
                 resp_pdf = session.get(pdfs_url, headers=headers)
@@ -170,12 +169,10 @@ class SelectionWayBot:
         if data.get("batch_pdf_url"):
             pdf_links.append(f"Batch Info PDF -> {data['batch_pdf_url']}")
 
-        # 2. Process Folder PDFs (UPDATED PARSING LOGIC)
-        # The new endpoint returns data grouped by topics or as a flat list
+        # 2. Process PDFs (HANDLES LIST OR DICT/GROUPED RESPONSE)
         if data.get("pdfs_data"):
             raw_pdfs = data["pdfs_data"]
             
-            # Helper to extract from a single PDF object
             def extract_pdf_item(item, topic_name=""):
                 title = item.get("title", "Unknown PDF")
                 url = item.get("url") or item.get("materialLink")
@@ -184,23 +181,19 @@ class SelectionWayBot:
                     return f"{prefix}{title} -> {self.clean_url(url)}"
                 return None
 
-            # Check if it's a list (flat) or dictionary (grouped)
             if isinstance(raw_pdfs, list):
-                # Handle List structure
                 for item in raw_pdfs:
-                    # Sometimes the list contains topics with nested PDFs
+                    # Check for nested 'pdfs' list inside the item
                     if "pdfs" in item and isinstance(item["pdfs"], list):
                         topic_title = item.get("title", "Topic")
                         for sub_pdf in item["pdfs"]:
                             link = extract_pdf_item(sub_pdf, topic_title)
                             if link: pdf_links.append(link)
                     else:
-                        # Direct PDF item
                         link = extract_pdf_item(item)
                         if link: pdf_links.append(link)
             
             elif isinstance(raw_pdfs, dict):
-                # Handle Dict structure (groupBy=topic usually returns dict)
                 for topic, items in raw_pdfs.items():
                     if isinstance(items, list):
                         for item in items:
@@ -379,3 +372,4 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("🤖 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
+
