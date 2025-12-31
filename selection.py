@@ -162,7 +162,7 @@ class SelectionWayBot:
         if data.get("batch_info_pdf"):
             pdf_links.append(f"ℹ️ Batch Info: {data['batch_info_pdf']}")
 
-        # 2. Process Classes (Extract Videos AND Class-level PDFs)
+        # 2. Process Classes
         if data.get("classes_data") and "classes" in data["classes_data"]:
             for topic in data["classes_data"]["classes"]:
                 for cls in topic.get("classes", []):
@@ -173,7 +173,6 @@ class SelectionWayBot:
                     quality_tag = "Link"
                     
                     recordings = cls.get("mp4Recordings", [])
-                    # Try to find best quality video
                     for q in ["720p", "480p", "360p"]:
                         for rec in recordings:
                             if rec.get("quality") == q:
@@ -185,27 +184,26 @@ class SelectionWayBot:
                     if best_video_url:
                         video_links.append(f"{title} ({quality_tag}): {self.clean_url(best_video_url)}")
 
-                    # --- B. Extract PDF/NOTES from the Class Object ---
-                    # Check all common fields where PDFs hide in these APIs
-                    possible_pdf_keys = ["note", "attachment", "pdf", "material", "notesUrl", "pdfUrl"]
-                    
+                    # --- B. Extract PDF/NOTES (Smart Scan) ---
+                    # Scan ALL keys in the dictionary for valid PDF urls
                     found_pdf = None
                     
-                    # Method 1: Direct key check
-                    for key in possible_pdf_keys:
-                        val = cls.get(key)
-                        if val and isinstance(val, str) and (val.startswith("http") or val.endswith(".pdf")):
-                            found_pdf = val
-                            break
+                    # 1. Check all string values in the class object
+                    for key, val in cls.items():
+                        if isinstance(val, str) and val.startswith("http"):
+                            # Check if it ends in .pdf OR contains /pdfs/ (like your example)
+                            if val.lower().endswith(".pdf") or "/pdfs/" in val:
+                                found_pdf = val
+                                break
                     
-                    # Method 2: Check inside 'resources' or 'attachments' array if it exists
+                    # 2. Check inside 'attachments' array if direct key fail
                     if not found_pdf and "attachments" in cls:
                         for att in cls["attachments"]:
-                            if att.get("url"): 
-                                found_pdf = att.get("url")
+                            url = att.get("url", "")
+                            if url and (url.endswith(".pdf") or "/pdfs/" in url): 
+                                found_pdf = url
                                 break
 
-                    # If we found a PDF attached to this class
                     if found_pdf:
                         pdf_links.append(f"📝 {title} (Notes): {self.clean_url(found_pdf)}")
                         
