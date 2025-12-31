@@ -5,9 +5,10 @@ import io
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram.request import HTTPXRequest
 
 # ---------------- CONFIG ----------------
-# ⚠️ TOKEN REPLACEMENT (Make sure this is your latest token)
+# ⚠️ YOUR TOKEN
 BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"
 
 BASE_HEADERS = {
@@ -67,27 +68,21 @@ async def fetch_pdfs(session: aiohttp.ClientSession, course_id: str):
         logging.error(f"Error fetching PDFs: {e}")
     return []
 
-# --- UPDATED EXTRACTOR LOGIC ---
+# --- UPDATED LOGIC FOR YOUR NEW JSON FORMAT ---
 def extract_content_from_classes(classes_data):
-    """Extracts BOTH Video links AND Class-attached PDFs (Board PDFs)"""
     content_list = []
     
     if not classes_data or "classes" not in classes_data:
         return content_list
     
     for topic in classes_data["classes"]:
-        # Optional: Add Topic Header
-        topic_name = topic.get("title", "Unknown Topic")
-        # content_list.append(f"\n--- {topic_name} ---") 
-        
         for cls in topic.get("classes", []):
             title = cls.get("title", "Unknown Class")
             
-            # 1. EXTRACT VIDEO
+            # 1. EXTRACT VIDEO (Same as before)
             best_url = cls.get("class_link")
             quality = "link"
             
-            # Check different qualities
             for q in ["720p", "480p", "360p"]:
                 for rec in cls.get("mp4Recordings", []):
                     if rec.get("quality") == q:
@@ -100,17 +95,24 @@ def extract_content_from_classes(classes_data):
             if best_url:
                 content_list.append(f"🎥 {title} ({quality}) -> {clean_url(best_url)}")
 
-            # 2. EXTRACT ATTACHED PDF (Board PDF / Notes)
-            # Checking multiple common keys where the PDF might be hidden
-            class_pdf = cls.get("note") or cls.get("attachment") or cls.get("pdf") or cls.get("material")
-            
-            if class_pdf:
-                content_list.append(f"📝 {title} (Board PDF) -> {clean_url(class_pdf)}")
+            # 2. EXTRACT PDF (UPDATED FOR 'classPdf' ARRAY)
+            # This handles the JSON format you just sent
+            if "classPdf" in cls and isinstance(cls["classPdf"], list):
+                for pdf_item in cls["classPdf"]:
+                    pdf_name = pdf_item.get("name", "Board PDF")
+                    pdf_url = pdf_item.get("url")
+                    if pdf_url:
+                        content_list.append(f"📝 {pdf_name} -> {clean_url(pdf_url)}")
+
+            # 3. Fallback for older formats (note/attachment)
+            else:
+                legacy_pdf = cls.get("note") or cls.get("attachment") or cls.get("pdf") or cls.get("material")
+                if legacy_pdf and isinstance(legacy_pdf, str):
+                    content_list.append(f"📝 {title} (Board PDF) -> {clean_url(legacy_pdf)}")
                 
     return content_list
 
 def extract_global_pdfs(pdfs_data):
-    """Extracts PDFs from the Study Materials section"""
     pdfs = []
     for pdf in pdfs_data:
         title = pdf.get("title", "Unknown PDF")
@@ -158,75 +160,85 @@ async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ID too short.")
         return
 
-    status_msg = await update.message.reply_text(f"⏳ Processing ID: `{course_id}`...", parse_mode='Markdown')
+    try:
+        status_msg = await update.message.reply_text(f"⏳ Processing ID: `{course_id}`...", parse_mode='Markdown')
 
-    headers = BASE_HEADERS.copy()
-    headers["host"] = "backend.multistreaming.site"
+        headers = BASE_HEADERS.copy()
+        headers["host"] = "backend.multistreaming.site"
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        # Get Title
-        course_title = f"Batch_{course_id}"
-        batch_pdf = None
-        courses_map = context.user_data.get('courses', {})
-        if course_id in courses_map:
-            course_obj = courses_map[course_id]
-            course_title = course_obj.get('title', course_title)
-            batch_pdf = course_obj.get('batchInfoPdfUrl')
-        
-        # Fetch Data
-        classes_data, pdfs_data = await asyncio.gather(
-            fetch_classes(session, course_id),
-            fetch_pdfs(session, course_id)
-        )
+        async with aiohttp.ClientSession(headers=headers) as session:
+            course_title = f"Batch_{course_id}"
+            batch_pdf = None
+            courses_map = context.user_data.get('courses', {})
+            if course_id in courses_map:
+                course_obj = courses_map[course_id]
+                course_title = course_obj.get('title', course_title)
+                batch_pdf = course_obj.get('batchInfoPdfUrl')
+            
+            # Fetch Data
+            classes_data, pdfs_data = await asyncio.gather(
+                fetch_classes(session, course_id),
+                fetch_pdfs(session, course_id)
+            )
 
-        # Extract
-        class_content_links = extract_content_from_classes(classes_data)
-        global_pdf_links = extract_global_pdfs(pdfs_data)
+            class_content_links = extract_content_from_classes(classes_data)
+            global_pdf_links = extract_global_pdfs(pdfs_data)
 
-        if batch_pdf:
-            global_pdf_links.insert(0, f"📕 Batch Brochure/PDF -> {clean_url(batch_pdf)}")
+            if batch_pdf:
+                global_pdf_links.insert(0, f"📕 Batch Brochure/PDF -> {clean_url(batch_pdf)}")
 
-        if not class_content_links and not global_pdf_links:
-            await status_msg.edit_text("❌ No content found.")
-            return
+            if not class_content_links and not global_pdf_links:
+                await status_msg.edit_text("❌ No content found.")
+                return
 
-        # Create File
-        safe_filename = "".join(c for c in course_title if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
-        if not safe_filename: safe_filename = "course_data"
-        
-        file_buffer = io.StringIO()
-        file_buffer.write(f"Course: {course_title}\n")
-        file_buffer.write(f"ID: {course_id}\n")
-        file_buffer.write("-" * 50 + "\n\n")
-        
-        if class_content_links:
-            file_buffer.write("🎬 CLASS VIDEOS & NOTES:\n")
-            file_buffer.write("=" * 50 + "\n")
-            for link in class_content_links:
-                file_buffer.write(link + "\n\n")
-        
-        if global_pdf_links:
-            file_buffer.write("📚 OTHER STUDY MATERIALS:\n")
-            file_buffer.write("=" * 50 + "\n")
-            for link in global_pdf_links:
-                file_buffer.write(link + "\n\n")
+            # Create File
+            safe_filename = "".join(c for c in course_title if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
+            if not safe_filename: safe_filename = "course_data"
+            
+            file_buffer = io.StringIO()
+            file_buffer.write(f"Course: {course_title}\n")
+            file_buffer.write(f"ID: {course_id}\n")
+            file_buffer.write("-" * 50 + "\n\n")
+            
+            if class_content_links:
+                file_buffer.write("🎬 CLASS VIDEOS & NOTES:\n")
+                file_buffer.write("=" * 50 + "\n")
+                for link in class_content_links:
+                    file_buffer.write(link + "\n\n")
+            
+            if global_pdf_links:
+                file_buffer.write("📚 OTHER STUDY MATERIALS:\n")
+                file_buffer.write("=" * 50 + "\n")
+                for link in global_pdf_links:
+                    file_buffer.write(link + "\n\n")
 
-        file_buffer.seek(0)
-        bytes_io = io.BytesIO(file_buffer.getvalue().encode('utf-8'))
-        bytes_io.name = f"{safe_filename}.txt"
+            file_buffer.seek(0)
+            bytes_io = io.BytesIO(file_buffer.getvalue().encode('utf-8'))
+            bytes_io.name = f"{safe_filename}.txt"
 
-        await update.message.reply_document(
-            document=bytes_io,
-            caption=f"✅ **Extraction Complete**\nIncludes Videos & Class Notes (Board PDFs).",
-            parse_mode='Markdown'
-        )
-        await status_msg.delete()
+            await update.message.reply_document(
+                document=bytes_io,
+                caption=f"✅ **Extraction Complete**\nIncludes Videos & Class Notes.",
+                parse_mode='Markdown',
+                read_timeout=120, 
+                write_timeout=120
+            )
+            await status_msg.delete()
+
+    except Exception as e:
+        logging.error(f"CRASH ERROR: {e}")
+        await update.message.reply_text(f"❌ Error occurred: {str(e)}")
 
 # ---------------- MAIN ----------------
 if __name__ == '__main__':
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Keep the high timeout to avoid crashes on large batches
+    t_request = HTTPXRequest(connection_pool_size=8, read_timeout=120, write_timeout=120, connect_timeout=60)
+    
+    application = ApplicationBuilder().token(BOT_TOKEN).request(t_request).build()
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_course_id))
+    
     print("🤖 Bot is running...")
     application.run_polling()
 
