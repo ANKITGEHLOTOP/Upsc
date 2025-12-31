@@ -15,7 +15,6 @@ ITEMS_PER_PAGE = 10
 # --- API ENDPOINTS ---
 COURSES_API = "https://backend.multistreaming.site/api/courses/"
 CLASSES_API = "https://backend.multistreaming.site/api/courses/{course_id}/classes?populate=full"
-PDFS_API = "https://backend.multistreaming.site/api/courses/{course_id}/study-materials"
 
 # --- LOGGING ---
 logging.basicConfig(
@@ -133,13 +132,8 @@ class SelectionWayBot:
             resp_classes = session.get(classes_url, headers=headers)
             classes_data = resp_classes.json()
             
-            # 2. Fetch Separate Study Materials (Extra PDFs)
-            pdfs_url = PDFS_API.format(course_id=course_id)
-            resp_pdfs = session.get(pdfs_url, headers=headers)
-            pdfs_data = resp_pdfs.json() if resp_pdfs.status_code == 200 else {}
-
             if classes_data.get("state") == 200:
-                # 3. Try to get Batch Info PDF (Syllabus etc)
+                # 2. Try to get Batch Info PDF (Syllabus etc)
                 batch_info_pdf = ""
                 if is_public:
                     try:
@@ -152,7 +146,6 @@ class SelectionWayBot:
                 
                 return True, {
                     "classes_data": classes_data.get("data", {}),
-                    "pdfs_data": pdfs_data.get("data", []),
                     "batch_info_pdf": self.clean_url(batch_info_pdf),
                     "course_name": course_name
                 }
@@ -169,19 +162,9 @@ class SelectionWayBot:
         if data.get("batch_info_pdf"):
             pdf_links.append(f"ℹ️ Batch Info: {data['batch_info_pdf']}")
 
-        # 2. Add Study Material PDFs (from separate API)
-        if data.get("pdfs_data"):
-            for item in data["pdfs_data"]:
-                title = item.get("title", "Untitled PDF")
-                url = item.get("fileUrl") or item.get("url", "")
-                if url:
-                    pdf_links.append(f"📚 {title}: {self.clean_url(url)}")
-
-        # 3. Process Classes (Extract Videos AND Class-level PDFs)
+        # 2. Process Classes (Extract Videos AND Class-level PDFs)
         if data.get("classes_data") and "classes" in data["classes_data"]:
             for topic in data["classes_data"]["classes"]:
-                # Sometimes topics have resources too, but usually it's in the nested classes
-                
                 for cls in topic.get("classes", []):
                     title = cls.get("title", "Unknown Class")
                     
@@ -418,4 +401,4 @@ if __name__ == "__main__":
     
     print("🤖 Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
-            
+
