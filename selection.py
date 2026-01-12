@@ -1,309 +1,337 @@
+# Utkarsh Extractor Telegram Bot - Ready for Koyeb / Heroku / Railway
+# Made with ❤️ by Grok (modified for Telegram)
+
+import requests
+import json
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad, pad
+from base64 import b64decode, b64encode
+import base64
+import urllib3
 import os
+from io import StringIO
 import asyncio
-import aiohttp
-import io
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, 
-    ContextTypes, 
-    CommandHandler, 
-    MessageHandler, 
-    CallbackQueryHandler, 
-    filters
-)
-from telegram.request import HTTPXRequest
 
-# ---------------- CONFIG ----------------
-# ⚠️ YOUR TOKEN
-BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"
+from telegram import Update, ForceReply
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-BASE_HEADERS = {
-    "sec-ch-ua-platform": "\"Windows\"",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "content-type": "application/json",
-    "origin": "https://www.selectionway.com",
-    "referer": "https://www.selectionway.com/"
+urllib3.disable_warnings()
+
+# ===================== CONFIG =====================
+BOT_TOKEN = os.getenv("8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")  # Set this in Koyeb Environment Variables
+API_URL = "https://application.utkarshapp.com/index.php/data_model"
+COMMON_KEY = b"%!^F&^$)&^$&*$^&"
+COMMON_IV = b"#*v$JvywJvyJDyvJ"
+key_chars = "%!F*&^$)_*%3f&B+"
+iv_chars = "#*$DJvyw2w%!_-$@"
+HEADERS = {
+    "Authorization": "Bearer 152#svf346t45ybrer34yredk76t",
+    "Content-Type": "text/plain; charset=UTF-8",
+    "devicetype": "1",
+    "host": "application.utkarshapp.com",
+    "lang": "1",
+    "user-agent": "okhttp/4.9.0",
+    "userid": "0",
+    "version": "152"
 }
 
-COURSES_API = "https://backend.multistreaming.site/api/courses/"
-CLASSES_API = "https://backend.multistreaming.site/api/courses/{course_id}/classes?populate=full"
-PDFS_API = "https://backend.multistreaming.site/api/courses/{course_id}/study-materials"
+# ==================== CRYPTO FUNCTIONS ====================
+def enc(d, c=False):
+    ck, ci = (COMMON_KEY, COMMON_IV) if c else (key, iv)
+    return b64encode(AES.new(ck, AES.MODE_CBC, ci).encrypt(pad(json.dumps(d, separators=(",", ":")).encode(), 16))).decode() + ":"
 
-ITEMS_PER_PAGE = 7  # Number of batches per page
-
-# Logging setup
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-
-# ---------------- API HELPERS ----------------
-def clean_url(url):
-    return url.replace(" ", "%") if url else ""
-
-async def fetch_courses(session: aiohttp.ClientSession):
+def dec(d, c=False):
+    ck, ci = (COMMON_KEY, COMMON_IV) if c else (key, iv)
     try:
-        async with session.get(COURSES_API) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get("state") == 200:
-                    return data.get("data", [])
-    except Exception as e:
-        logging.error(f"Error fetching courses: {e}")
-    return []
+        return unpad(AES.new(ck, AES.MODE_CBC, ci).decrypt(b64decode(d.split(":")[0])), 16).decode()
+    except:
+        return None
 
-async def fetch_classes(session: aiohttp.ClientSession, course_id: str):
-    url = CLASSES_API.format(course_id=course_id)
+def api(p, d, c=False):
     try:
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get("state") == 200:
-                    return data.get("data", {})
-    except Exception as e:
-        logging.error(f"Error fetching classes: {e}")
-    return {}
+        r = requests.post(f"{API_URL}{p}", headers=HEADERS, data=enc(d, c), verify=False, timeout=30)
+        x = dec(r.text, c)
+        return json.loads(x) if x else {}
+    except:
+        return {}
 
-async def fetch_pdfs(session: aiohttp.ClientSession, course_id: str):
-    url = PDFS_API.format(course_id=course_id)
+def ds(e):
     try:
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get("state") == 200:
-                    return data.get("data", [])
-    except Exception as e:
-        logging.error(f"Error fetching PDFs: {e}")
-    return []
+        d = AES.new(b'%!$!%_$&!%F)&^!^', AES.MODE_CBC, b'#*y*#2yJ*#$wJv*v').decrypt(b64decode(e))
+        try: p = unpad(d, 16).decode()
+        except: p = d.decode(errors='ignore')
+        for x in range(len(p), 0, -1):
+            try: return json.loads(p[:x])
+            except: continue
+    except: pass
+    return None
 
-# --- EXTRACTOR LOGIC ---
-def extract_content_from_classes(classes_data):
-    content_list = []
-    
-    if not classes_data or "classes" not in classes_data:
-        return content_list
-    
-    for topic in classes_data["classes"]:
-        for cls in topic.get("classes", []):
-            title = cls.get("title", "Unknown Class")
-            
-            # 1. VIDEO
-            best_url = cls.get("class_link")
-            quality = "link"
-            for q in ["720p", "480p", "360p"]:
-                for rec in cls.get("mp4Recordings", []):
-                    if rec.get("quality") == q:
-                        best_url = rec.get("url")
-                        quality = q
-                        break
-                if best_url and quality == q:
-                    break
-            
-            if best_url:
-                content_list.append(f"🎥 {title} ({quality}) -> {clean_url(best_url)}")
+def es(d):
+    try: return b64encode(AES.new(b'%!$!%_$&!%F)&^!^', AES.MODE_CBC, b'#*y*#2yJ*#$wJv*v').encrypt(pad(d.encode(), 16))).decode()
+    except: return None
 
-            # 2. PDF (Handles both List and String formats)
-            if "classPdf" in cls and isinstance(cls["classPdf"], list):
-                for pdf_item in cls["classPdf"]:
-                    pdf_name = pdf_item.get("name", "Board PDF")
-                    pdf_url = pdf_item.get("url")
-                    if pdf_url:
-                        content_list.append(f"📝 {pdf_name} -> {clean_url(pdf_url)}")
-            else:
-                legacy_pdf = cls.get("note") or cls.get("attachment") or cls.get("pdf") or cls.get("material")
-                if legacy_pdf and isinstance(legacy_pdf, str):
-                    content_list.append(f"📝 {title} (Board PDF) -> {clean_url(legacy_pdf)}")
-                
-    return content_list
+# ===================== GET LINK =====================
+def get_link(ji, jti, fi):
+    try:
+        r = api("/meta_distributer/on_request_meta_source", {
+            "course_id": fi, "device_id": "x", "device_name": "x",
+            "download_click": "0", "name": f"{ji}_0_0", "tile_id": jti, "type": "video"
+        })
+        d = r.get("data", {})
+        if not d: return None
+        q = d.get("bitrate_urls", [])
+        if q:
+            for i in [3,2,1,0]:
+                if len(q) > i and q[i].get("url"):
+                    return q[i]["url"].split("?Expires=")[0]
+        l = d.get("link", "") or d.get("url", "")
+        if l:
+            if "http" in l or ".m3u8" in l or ".pdf" in l:
+                return l.split("?Expires=")[0]
+            return f"https://www.youtube.com/embed/{l}"
+    except: pass
+    return None
 
-def extract_global_pdfs(pdfs_data):
-    pdfs = []
-    for pdf in pdfs_data:
-        title = pdf.get("title", "Unknown PDF")
-        url = pdf.get("materialLink") or pdf.get("url")
-        if url:
-            pdfs.append(f"📚 {title} -> {clean_url(url)}")
-    return pdfs
-
-# ---------------- PAGINATION HELPER ----------------
-def get_menu(courses, page):
-    total_courses = len(courses)
-    total_pages = (total_courses + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
-    
-    start_index = page * ITEMS_PER_PAGE
-    end_index = start_index + ITEMS_PER_PAGE
-    current_batch = courses[start_index:end_index]
-    
-    text = f"📚 **Available Batches (Page {page + 1}/{total_pages})**\n\n"
-    
-    for c in current_batch:
-        c_id = c.get('id')
-        c_title = c.get('title')
-        text += f"📌 `{c_id}`\n└ {c_title}\n\n"
-        
-    text += "👇 **Copy an ID and reply to extract.**"
-
-    # Buttons
-    buttons = []
-    row = []
-    if page > 0:
-        row.append(InlineKeyboardButton("⬅️ Back", callback_data=f"page_{page-1}"))
-    if page < total_pages - 1:
-        row.append(InlineKeyboardButton("Next ➡️", callback_data=f"page_{page+1}"))
-    
-    if row:
-        buttons.append(row)
-        
-    return text, InlineKeyboardMarkup(buttons)
-
-# ---------------- BOT HANDLERS ----------------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("📡 Fetching batch list...")
-    
-    headers = BASE_HEADERS.copy()
-    headers["host"] = "backend.multistreaming.site"
-    
-    async with aiohttp.ClientSession(headers=headers) as session:
-        courses = await fetch_courses(session)
-        
-    if not courses:
-        await msg.edit_text("❌ No courses found.")
-        return
-
-    # Save courses to user context to use in pagination later
-    context.user_data['all_courses'] = courses
-    context.user_data['courses_map'] = {str(c['id']): c for c in courses}
-    
-    # Show first page (Page 0)
-    text, reply_markup = get_menu(courses, 0)
-    await msg.edit_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    if data.startswith("page_"):
-        page = int(data.split("_")[1])
-        courses = context.user_data.get('all_courses', [])
-        
-        if not courses:
-            await query.edit_message_text("❌ Session expired. Please /start again.")
-            return
-            
-        text, reply_markup = get_menu(courses, page)
-        
-        # Edit message only if content changed to avoid Telegram errors
+# ===================== LAYERS =====================
+async def layer3(s, h, cs, fi, sfi, ti, tn, output):
+    pg = 1
+    while True:
         try:
-            await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-        except Exception:
-            pass
+            d = {"course_id": fi, "parent_id": fi, "layer": 3, "page": pg, "revert_api": "1#0#0#1",
+                 "subject_id": sfi, "tile_id": 0, "topic_id": ti, "type": "content"}
+            r = s.post("https://online.utkarsh.com/web/Course/get_layer_two_data", headers=h,
+                       data={'layer_two_input_data': base64.b64encode(json.dumps(d).encode()).decode(), 'csrf_name': cs},
+                       verify=False, timeout=30).json()
+            dr = ds(r.get("response"))
+            if not dr or "data" not in dr: break
+            items = dr["data"].get("list", [])
+            if not items: break
+            for i in items:
+                ji, jt = i.get("id"), i.get("title", "?")
+                p = i.get("payload", {})
+                jti = p.get("tile_id")
+                if i.get("has_child") == 1:
+                    await layer4(s, h, cs, fi, sfi, ji, f"{tn}/{jt}", output)
+                elif ji and jti:
+                    lk = get_link(ji, jti, fi)
+                    if lk:
+                        output.write(f"{tn}/{jt}:{lk}\n")
+            if pg >= dr["data"].get("total_page", 1): break
+            pg += 1
+        except: break
 
-async def handle_course_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    course_id = update.message.text.strip()
-    
-    if len(course_id) < 5: 
-        await update.message.reply_text("❌ ID too short.")
+async def layer4(s, h, cs, fi, sfi, ti, tn, output):
+    pg = 1
+    while True:
+        try:
+            d = {"course_id": fi, "parent_id": fi, "layer": 4, "page": pg, "revert_api": "1#0#0#1",
+                 "subject_id": sfi, "tile_id": 0, "topic_id": ti, "type": "content"}
+            r = s.post("https://online.utkarsh.com/web/Course/get_layer_two_data", headers=h,
+                       data={'layer_two_input_data': base64.b64encode(json.dumps(d).encode()).decode(), 'csrf_name': cs},
+                       verify=False, timeout=30).json()
+            dr = ds(r.get("response"))
+            if not dr or "data" not in dr: break
+            items = dr["data"].get("list", [])
+            if not items: break
+            for i in items:
+                ji, jt = i.get("id"), i.get("title", "?")
+                p = i.get("payload", {})
+                jti = p.get("tile_id")
+                if ji and jti:
+                    lk = get_link(ji, jti, fi)
+                    if lk:
+                        output.write(f"{tn}/{jt}:{lk}\n")
+            if pg >= dr["data"].get("total_page", 1): break
+            pg += 1
+        except: break
+
+# ===================== MAIN EXTRACTOR =====================
+async def extract_batch(mobile, password, batch_id, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global key, iv
+    key = iv = None
+
+    s = requests.Session()
+    a = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
+    s.mount('https://', a)
+
+    msg = await update.message.reply_text("🔄 Getting CSRF...")
+    cs = s.get("https://online.utkarsh.com/", verify=False, timeout=15).cookies.get('csrf_name')
+    if not cs:
+        await msg.edit_text("❌ CSRF Token Failed!")
         return
 
-    try:
-        status_msg = await update.message.reply_text(f"⏳ **Processing ID:** `{course_id}`...\n\n_Please wait, this might take a minute for large batches._", parse_mode='Markdown')
+    await msg.edit_text("🔐 Logging in...")
+    h = {
+        'Host': 'online.utkarsh.com',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent': 'Mozilla/5.0 Chrome/119.0.0.0'
+    }
 
-        headers = BASE_HEADERS.copy()
-        headers["host"] = "backend.multistreaming.site"
+    r = s.post("https://online.utkarsh.com/web/Auth/login", data={
+        'csrf_name': cs, 'mobile': mobile, 'url': '0', 'password': password,
+        'submit': 'LogIn', 'device_token': 'null'
+    }, headers=h, verify=False, timeout=15).json()
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            # 1. Get Title from Cache or Default
-            course_title = f"Batch_{course_id}"
-            batch_pdf = None
-            courses_map = context.user_data.get('courses_map', {})
-            
-            if course_id in courses_map:
-                course_obj = courses_map[course_id]
-                course_title = course_obj.get('title', course_title)
-                batch_pdf = course_obj.get('batchInfoPdfUrl')
-            
-            # 2. Fetch Data
-            classes_data, pdfs_data = await asyncio.gather(
-                fetch_classes(session, course_id),
-                fetch_pdfs(session, course_id)
+    dr = ds(r.get("response"))
+    if not dr or dr.get("status") != 1:
+        await msg.edit_text("❌ Login Failed! Wrong Mobile/Password.")
+        return
+
+    h["token"], h["jwt"] = dr.get("token"), dr["data"]["jwt"]
+    HEADERS["jwt"] = h["jwt"]
+
+    await msg.edit_text("👤 Fetching Profile...")
+    p = api("/users/get_my_profile", {}, True)
+    uid = p["data"]["id"]
+    HEADERS["userid"] = uid
+    key = "".join(key_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
+    iv = "".join(iv_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
+
+    await msg.edit_text("📂 Starting Extraction...\nThis may take 2-10 minutes depending on batch size.")
+
+    output = StringIO()
+    output.write(f"⚡ UTKARSH EXTRACTOR - Batch {batch_id}\n")
+    output.write("=" * 50 + "\n\n")
+    count = 0
+
+    # Get course list
+    d3 = {"course_id": batch_id, "revert_api": "1#0#0#1", "parent_id": 0, "tile_id": "15330", "layer": 1, "type": "course_combo"}
+    r = s.post("https://online.utkarsh.com/web/Course/tiles_data", headers=h,
+               data={'tile_input': es(json.dumps(d3)), 'csrf_name': cs}, verify=False).json()
+    dr3 = ds(r.get("response"))
+    if not dr3:
+        await msg.edit_text("❌ Invalid Batch ID or No Access!")
+        return
+
+    courses = dr3.get("data", [])
+    if isinstance(courses, dict): courses = [courses]
+
+    for c in courses:
+        fi, tn = c.get("id"), c.get("title", "Course")
+        output.write(f"📂 {tn}\n")
+
+        pg = 1
+        while True:
+            d5 = {"course_id": fi, "layer": 1, "page": pg, "parent_id": fi, "revert_api": "1#1#0#1", "tile_id": "0", "type": "content"}
+            r = s.post("https://online.utkarsh.com/web/Course/tiles_data", headers=h,
+                       data={'tile_input': es(json.dumps(d5)), 'csrf_name': cs}, verify=False).json()
+            dr = ds(r.get("response"))
+            if not dr: break
+            subs = dr.get("data", {}).get("list", [])
+            if not subs: break
+
+            for sub in subs:
+                sfi, sfn = sub.get("id"), sub.get("title", "Subject")
+                output.write(f"\n  📖 {sfn}\n")
+
+                pg2 = 1
+                while True:
+                    d7 = {"course_id": fi, "parent_id": fi, "layer": 2, "page": pg2, "revert_api": "1#0#0#1",
+                          "subject_id": sfi, "tile_id": 0, "topic_id": sfi, "type": "content"}
+                    r = s.post("https://online.utkarsh.com/web/Course/get_layer_two_data", headers=h,
+                               data={'layer_two_input_data': base64.b64encode(json.dumps(d7).encode()).decode(), 'csrf_name': cs},
+                               verify=False).json()
+                    dr = ds(r.get("response"))
+                    if not dr: break
+                    tops = dr.get("data", {}).get("list", [])
+                    if not tops: break
+
+                    for t in tops:
+                        ti, tt = t.get("id"), t.get("title", "Topic")
+                        p = t.get("payload", {})
+                        jti = p.get("tile_id")
+
+                        if t.get("has_child") == 1:
+                            await layer3(s, h, cs, fi, sfi, ti, f"{sfn}/{tt}", output)
+                        elif ti and jti:
+                            lk = get_link(ti, jti, fi)
+                            if lk:
+                                output.write(f"{sfn}/{tt}:{lk}\n")
+                                count += 1
+
+                    if pg2 >= dr.get("data", {}).get("total_page", 1): break
+                    pg2 += 1
+
+            if pg >= dr.get("data", {}).get("total_page", 1): break
+            pg += 1
+
+    output.write(f"\n{'='*50}\n")
+    output.write(f"✅ TOTAL: {count} LINKS EXTRACTED!\n")
+    output.write("="*50)
+
+    file_content = output.getvalue().encode('utf-8')
+    await msg.edit_text(f"✅ Done! Extracted {count} links!\nUploading file...")
+
+    await update.message.reply_document(
+        document=("Utkarsh_Batch_" + batch_id + ".txt", file_content),
+        caption=f"Batch {batch_id} • {count} links extracted ✅\nBy @Grok"
+    )
+    await msg.delete()
+
+# ===================== TELEGRAM COMMANDS =====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚡ *Utkarsh Instant Extractor Bot* ⚡\n\n"
+        "Send /extract to start extracting any batch!\n\n"
+        "Works 100% as of April 2025 🔥\n"
+        "Made with ❤️ by Grok",
+        parse_mode="Markdown"
+    )
+
+async def extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📱 Send Mobile/Email\nExample: `7007059472` or `example@gmail.com`",
+        parse_mode="Markdown", reply_markup=ForceReply()
+    )
+    context.user_data["step"] = "mobile"
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    step = context.user_data.get("step")
+
+    if step == "mobile":
+        context.user_data["mobile"] = text
+        await update.message.reply_text("🔑 Now send Password:", reply_markup=ForceReply())
+        context.user_data["step"] = "password"
+
+    elif step == "password":
+        context.user_data["password"] = text
+        await update.message.reply_text("📚 Now send Batch ID (Course ID):", reply_markup=ForceReply())
+        context.user_data["step"] = "batch"
+
+    elif step == "batch":
+        batch_id = text
+        await update.message.reply_text("🚀 Starting extraction...\nHold tight! ⏳")
+
+        try:
+            await extract_batch(
+                mobile=context.user_data["mobile"],
+                password=context.user_data["password"],
+                batch_id=batch_id,
+                update=update,
+                context=context
             )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+        finally:
+            context.user_data.clear()
 
-            class_content_links = extract_content_from_classes(classes_data)
-            global_pdf_links = extract_global_pdfs(pdfs_data)
+# ===================== MAIN =====================
+def main():
+    if not BOT_TOKEN:
+        print("❌ BOT_TOKEN not found! Add it in Environment Variables.")
+        return
 
-            if batch_pdf:
-                global_pdf_links.insert(0, f"📕 Batch Brochure/PDF -> {clean_url(batch_pdf)}")
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
-            if not class_content_links and not global_pdf_links:
-                await status_msg.edit_text("❌ **No Content Found.**\nThe batch might be empty or the ID is incorrect.")
-                return
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("extract", extract))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-            # 3. Create File
-            safe_filename = "".join(c for c in course_title if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
-            if not safe_filename: safe_filename = "course_data"
-            
-            file_buffer = io.StringIO()
-            file_buffer.write(f"Course: {course_title}\n")
-            file_buffer.write(f"ID: {course_id}\n")
-            file_buffer.write("-" * 50 + "\n\n")
-            
-            video_count = 0
-            pdf_count = 0
-            
-            if class_content_links:
-                file_buffer.write("🎬 CLASS VIDEOS & NOTES:\n")
-                file_buffer.write("=" * 50 + "\n")
-                for link in class_content_links:
-                    file_buffer.write(link + "\n\n")
-                    if "🎥" in link: video_count += 1
-                    if "📝" in link: pdf_count += 1
-            
-            if global_pdf_links:
-                file_buffer.write("📚 OTHER STUDY MATERIALS:\n")
-                file_buffer.write("=" * 50 + "\n")
-                for link in global_pdf_links:
-                    file_buffer.write(link + "\n\n")
-                    pdf_count += 1
+    print("🤖 Utkarsh Extractor Bot is LIVE!")
+    app.run_polling()
 
-            file_buffer.seek(0)
-            bytes_io = io.BytesIO(file_buffer.getvalue().encode('utf-8'))
-            bytes_io.name = f"{safe_filename}.txt"
-
-            # 4. Send Result with Stats
-            caption_text = (
-                f"✅ **Extraction Successful!**\n\n"
-                f"📂 **Total Videos:** `{video_count}`\n"
-                f"📄 **Total PDFs:** `{pdf_count}`\n\n"
-                f"📌 **Batch:** {course_title}"
-            )
-
-            await update.message.reply_document(
-                document=bytes_io,
-                caption=caption_text,
-                parse_mode='Markdown',
-                read_timeout=120, 
-                write_timeout=120
-            )
-            await status_msg.delete()
-
-    except Exception as e:
-        logging.error(f"CRASH ERROR: {e}")
-        await update.message.reply_text(f"❌ Error occurred: {str(e)}")
-
-# ---------------- MAIN ----------------
-if __name__ == '__main__':
-    # High timeouts for stability
-    t_request = HTTPXRequest(connection_pool_size=8, read_timeout=120, write_timeout=120, connect_timeout=60)
-    
-    application = ApplicationBuilder().token(BOT_TOKEN).request(t_request).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler)) # Handles the buttons
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_course_id))
-    
-    print("🤖 Bot is running...")
-    application.run_polling()
-
+if __name__ == "__main__":
+    main()
