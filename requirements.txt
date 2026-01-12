@@ -1,3 +1,5 @@
-python-telegram-bot>=21.0
-pycryptodome
-requests
+python-telegram-bot==20.7
+requests==2.31.0
+pycryptodome==3.19.0
+flask==3.0.0
+gunicorn==21.2.0
