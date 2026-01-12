@@ -1,5 +1,7 @@
 python-telegram-bot==21.6
-
 requests
-
 aiohttp
+python-telegram-bot==20.8
+pycryptodome
+requests
+urllib3
