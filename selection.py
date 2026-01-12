@@ -42,7 +42,7 @@ HEADERS = {
 }
 
 # Conversation states
-LOGIN_EMAIL, LOGIN_PASSWORD, BATCH_ID = range(3)
+WAITING_LOGIN, WAITING_BATCH = range(2)
 
 # User sessions storage
 user_sessions = {}
@@ -140,92 +140,10 @@ def encrypt_stream(plain_text):
         print(f"Encryption error: {e}")
         return None
 
-# ======================= BOT HANDLERS =======================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔐 Login", callback_data="login")],
-        [InlineKeyboardButton("📚 Extract Course", callback_data="extract")],
-        [InlineKeyboardButton("ℹ️ Help", callback_data="help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    welcome_msg = """
-🎓 *Welcome to Utkarsh Course Extractor Bot!*
-
-━━━━━━━━━━━━━━━━━━━━━
-📌 *Available Commands:*
-• /start - Start the bot
-• /login - Login to your account
-• /extract - Extract course data
-• /logout - Logout from account
-• /help - Show help message
-━━━━━━━━━━━━━━━━━━━━━
-
-👨‍💻 *Developer:* @MrHacker
-"""
-    await update.message.reply_text(welcome_msg, parse_mode='Markdown', reply_markup=reply_markup)
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-📖 *How to Use This Bot:*
-
-1️⃣ First, login with /login command
-2️⃣ Enter your email/mobile number
-3️⃣ Enter your password
-4️⃣ Once logged in, use /extract
-5️⃣ Enter the Batch ID to extract
-
-━━━━━━━━━━━━━━━━━━━━━
-⚠️ *Note:* You must have a valid Utkarsh account to use this bot.
-━━━━━━━━━━━━━━━━━━━━━
-"""
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "login":
-        await query.message.reply_text("📧 Please enter your Email or Mobile Number:")
-        return LOGIN_EMAIL
-    elif query.data == "extract":
-        user_id = query.from_user.id
-        if user_id not in user_sessions or not user_sessions[user_id].get('logged_in'):
-            await query.message.reply_text("❌ Please login first using /login")
-            return ConversationHandler.END
-        await query.message.reply_text("📚 Please enter the Batch ID to extract:")
-        return BATCH_ID
-    elif query.data == "help":
-        help_text = """
-📖 *How to Use This Bot:*
-
-1️⃣ First, login with /login command
-2️⃣ Enter your email/mobile number
-3️⃣ Enter your password
-4️⃣ Once logged in, use /extract
-5️⃣ Enter the Batch ID to extract
-"""
-        await query.message.reply_text(help_text, parse_mode='Markdown')
-        return ConversationHandler.END
-
-async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📧 Please enter your Email or Mobile Number:")
-    return LOGIN_EMAIL
-
-async def login_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['email'] = update.message.text
-    await update.message.reply_text("🔑 Please enter your Password:")
-    return LOGIN_PASSWORD
-
-async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    email = context.user_data.get('email')
-    password = update.message.text
-    
-    await update.message.reply_text("🔄 Logging in... Please wait...")
-    
+# ======================= LOGIN FUNCTION =======================
+def perform_login(email, password):
+    """Perform login and return session data or None"""
     try:
-        # Initialize session
         session = requests.Session()
         base_url = 'https://online.utkarsh.com/'
         login_url = 'https://online.utkarsh.com/web/Auth/login'
@@ -235,8 +153,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         csrf_token = r1.cookies.get('csrf_name')
         
         if not csrf_token:
-            await update.message.reply_text("❌ Failed to get CSRF token. Try again later.")
-            return ConversationHandler.END
+            return None, "Failed to get CSRF token"
         
         # Login
         d1 = {
@@ -260,15 +177,13 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dr1 = decrypt_and_load_json(r2)
         
         if not dr1:
-            await update.message.reply_text("❌ Login failed! Invalid credentials.")
-            return ConversationHandler.END
+            return None, "Invalid credentials"
         
         t = dr1.get("token")
         jwt = dr1.get("data", {}).get("jwt")
         
         if not jwt:
-            await update.message.reply_text("❌ Login failed! Could not get JWT token.")
-            return ConversationHandler.END
+            return None, "Could not get JWT token"
         
         h["token"] = t
         h["jwt"] = jwt
@@ -281,15 +196,15 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_profile_id = profile.get("data", {}).get("id")
         
         if not user_profile_id:
-            await update.message.reply_text("❌ Failed to get user profile.")
-            return ConversationHandler.END
+            return None, "Failed to get user profile"
         
         # Generate keys
         key = "".join(key_chars[int(i)] for i in (user_profile_id + "1524567456436545")[:16]).encode()
         iv = "".join(iv_chars[int(i)] for i in (user_profile_id + "1524567456436545")[:16]).encode()
         
-        # Store session
-        user_sessions[user_id] = {
+        headers_copy["userid"] = user_profile_id
+        
+        session_data = {
             'logged_in': True,
             'session': session,
             'csrf_token': csrf_token,
@@ -300,17 +215,235 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'user_profile_id': user_profile_id
         }
         
-        await update.message.reply_text(f"""
-✅ *Login Successful!*
-
-👤 User ID: `{user_profile_id}`
-
-━━━━━━━━━━━━━━━━━━━━━
-Now use /extract to extract course data.
-""", parse_mode='Markdown')
+        return session_data, None
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Login Error: {str(e)}")
+        return None, str(e)
+
+# ======================= BOT HANDLERS =======================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    logged_in = user_id in user_sessions and user_sessions[user_id].get('logged_in')
+    
+    if logged_in:
+        keyboard = [
+            [InlineKeyboardButton("📚 Extract Course", callback_data="extract")],
+            [InlineKeyboardButton("🚪 Logout", callback_data="logout")],
+            [InlineKeyboardButton("ℹ️ Help", callback_data="help")]
+        ]
+        status = "✅ *Status:* Logged In"
+    else:
+        keyboard = [
+            [InlineKeyboardButton("🔐 Login", callback_data="login")],
+            [InlineKeyboardButton("ℹ️ Help", callback_data="help")]
+        ]
+        status = "❌ *Status:* Not Logged In"
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    welcome_msg = f"""
+🎓 *Welcome to Utkarsh Course Extractor Bot!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+{status}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📌 *Commands:*
+• /login - Login to account
+• /extract - Extract course
+• /logout - Logout
+• /help - Help
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+👨‍💻 *Developer:* @MrHacker
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    await update.message.reply_text(welcome_msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+📖 *HOW TO USE THIS BOT*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔐 *LOGIN FORMAT:*
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Send: `Number*Password`
+
+📝 *Example:*
+`9876543210*MyPassword123`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 *EXTRACT FORMAT:*
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Just send the Batch ID
+
+📝 *Example:*
+`12345`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 *STEPS:*
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣ Use /login command
+2️⃣ Send: `Number*Password`
+3️⃣ Use /extract command
+4️⃣ Send: `BatchID`
+5️⃣ Wait for extraction!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    if query.data == "login":
+        await query.message.reply_text("""
+🔐 *LOGIN TO UTKARSH*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 *Send your credentials in format:*
+
+`Number*Password`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+✏️ *Example:*
+`9876543210*MyPassword123`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ Use /cancel to cancel
+""", parse_mode='Markdown')
+        return WAITING_LOGIN
+    
+    elif query.data == "extract":
+        if user_id not in user_sessions or not user_sessions[user_id].get('logged_in'):
+            await query.message.reply_text("❌ Please login first using /login")
+            return ConversationHandler.END
+        
+        await query.message.reply_text("""
+📚 *EXTRACT COURSE*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 *Send the Batch ID:*
+
+✏️ *Example:* `12345`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ Use /cancel to cancel
+""", parse_mode='Markdown')
+        return WAITING_BATCH
+    
+    elif query.data == "logout":
+        if user_id in user_sessions:
+            del user_sessions[user_id]
+            await query.message.reply_text("✅ *Logged out successfully!*", parse_mode='Markdown')
+        else:
+            await query.message.reply_text("❌ You are not logged in.")
+        return ConversationHandler.END
+    
+    elif query.data == "help":
+        help_text = """
+📖 *LOGIN FORMAT:*
+`Number*Password`
+
+📖 *EXAMPLE:*
+`9876543210*MyPassword123`
+"""
+        await query.message.reply_text(help_text, parse_mode='Markdown')
+        return ConversationHandler.END
+
+async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("""
+🔐 *LOGIN TO UTKARSH*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 *Send your credentials in format:*
+
+`Number*Password`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+✏️ *Example:*
+`9876543210*MyPassword123`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ Use /cancel to cancel
+""", parse_mode='Markdown')
+    return WAITING_LOGIN
+
+async def process_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    # Check format
+    if '*' not in text:
+        await update.message.reply_text("""
+❌ *Invalid Format!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 *Correct Format:*
+`Number*Password`
+
+✏️ *Example:*
+`9876543210*MyPassword123`
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔄 Try again or /cancel
+""", parse_mode='Markdown')
+        return WAITING_LOGIN
+    
+    # Split credentials
+    parts = text.split('*', 1)
+    if len(parts) != 2:
+        await update.message.reply_text("❌ Invalid format! Use: `Number*Password`", parse_mode='Markdown')
+        return WAITING_LOGIN
+    
+    email = parts[0].strip()
+    password = parts[1].strip()
+    
+    if not email or not password:
+        await update.message.reply_text("❌ Number and Password cannot be empty!")
+        return WAITING_LOGIN
+    
+    # Delete the message containing password for security
+    try:
+        await update.message.delete()
+    except:
+        pass
+    
+    status_msg = await update.effective_chat.send_message("🔄 *Logging in... Please wait...*", parse_mode='Markdown')
+    
+    # Perform login
+    session_data, error = perform_login(email, password)
+    
+    if error:
+        await status_msg.edit_text(f"""
+❌ *Login Failed!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ Error: {error}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔄 Try again with /login
+""", parse_mode='Markdown')
+        return ConversationHandler.END
+    
+    # Store session
+    user_sessions[user_id] = session_data
+    
+    await status_msg.edit_text(f"""
+✅ *Login Successful!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 *User ID:* `{session_data['user_profile_id']}`
+📱 *Number:* `{email}`
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📚 Now use /extract to extract courses!
+""", parse_mode='Markdown')
     
     return ConversationHandler.END
 
@@ -318,18 +451,36 @@ async def extract_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id not in user_sessions or not user_sessions[user_id].get('logged_in'):
-        await update.message.reply_text("❌ Please login first using /login")
+        await update.message.reply_text("""
+❌ *Not Logged In!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔐 Please login first using /login
+
+📝 *Format:* `Number*Password`
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""", parse_mode='Markdown')
         return ConversationHandler.END
     
-    await update.message.reply_text("📚 Please enter the Batch ID to extract:")
-    return BATCH_ID
+    await update.message.reply_text("""
+📚 *EXTRACT COURSE*
 
-async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 *Send the Batch ID:*
+
+✏️ *Example:* `12345`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ Use /cancel to cancel
+""", parse_mode='Markdown')
+    return WAITING_BATCH
+
+async def process_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     batch_id = update.message.text.strip()
     
     if user_id not in user_sessions:
-        await update.message.reply_text("❌ Please login first using /login")
+        await update.message.reply_text("❌ Session expired! Please /login again.")
         return ConversationHandler.END
     
     session_data = user_sessions[user_id]
@@ -340,7 +491,13 @@ async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     iv = session_data['iv']
     api_headers = session_data['api_headers']
     
-    await update.message.reply_text("🔄 Extracting course data... This may take a while...")
+    status_msg = await update.message.reply_text("""
+🔄 *Extracting Course Data...*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⏳ This may take a while...
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""", parse_mode='Markdown')
     
     try:
         tiles_data_url = 'https://online.utkarsh.com/web/Course/tiles_data'
@@ -364,17 +521,33 @@ async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dr3 = decrypt_and_load_json(r4)
         
         if not dr3 or "data" not in dr3:
-            await update.message.reply_text("❌ Failed to get course data. Invalid Batch ID or access denied.")
+            await status_msg.edit_text("""
+❌ *Extraction Failed!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ Invalid Batch ID or No Access
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔄 Try again with /extract
+""", parse_mode='Markdown')
             return ConversationHandler.END
         
         all_links = []
         course_count = 0
+        processed_subjects = 0
         
         for course in dr3.get("data", []):
             fi = course.get("id")
             tn = course.get("title", "Unknown")
             
-            await update.message.reply_text(f"📂 Processing: {tn}")
+            await status_msg.edit_text(f"""
+🔄 *Extracting...*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📂 *Course:* {tn[:30]}...
+📊 *Links Found:* {course_count}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""", parse_mode='Markdown')
             
             # Get content list
             d5 = {
@@ -399,6 +572,7 @@ async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for subject in dr4.get("data", {}).get("list", []):
                 sfi = subject.get("id")
                 sfn = subject.get("title", "Unknown Subject")
+                processed_subjects += 1
                 
                 # Layer 2
                 d7 = {
@@ -468,7 +642,6 @@ async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             "type": "video"
                         }
                         
-                        api_headers["userid"] = session_data['user_profile_id']
                         j5 = post_request(meta_source_url, j4, key=key, iv=iv, headers=api_headers)
                         cj = j5.get("data", {})
                         
@@ -494,39 +667,68 @@ async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         pu = f"https://www.youtube.com/embed/{vu}"
                                     all_links.append(f"{jt}:{pu}")
                                     course_count += 1
+                    
+                    # Update progress
+                    if course_count % 10 == 0:
+                        await status_msg.edit_text(f"""
+🔄 *Extracting...*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📂 *Subject:* {sfn[:25]}...
+📊 *Links Found:* {course_count}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""", parse_mode='Markdown')
         
         if all_links:
-            # Split into chunks if too long
-            chunk_size = 50
-            for i in range(0, len(all_links), chunk_size):
-                chunk = all_links[i:i + chunk_size]
-                content = "\n".join(chunk)
-                
-                # Send as file
-                file_name = f"batch_{batch_id}_part_{i//chunk_size + 1}.txt"
-                with open(file_name, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                
-                with open(file_name, 'rb') as f:
-                    await update.message.reply_document(
-                        document=f,
-                        filename=file_name,
-                        caption=f"📄 Batch: {batch_id} | Part: {i//chunk_size + 1}"
-                    )
-                
-                os.remove(file_name)
+            # Create and send file
+            file_content = "\n".join(all_links)
+            file_name = f"Batch_{batch_id}.txt"
             
-            await update.message.reply_text(f"""
+            with open(file_name, 'w', encoding='utf-8') as f:
+                f.write(file_content)
+            
+            await status_msg.delete()
+            
+            with open(file_name, 'rb') as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=file_name,
+                    caption=f"""
 ✅ *Extraction Complete!*
 
-📊 Total Links: {course_count}
-📁 Batch ID: {batch_id}
-""", parse_mode='Markdown')
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📁 *Batch ID:* `{batch_id}`
+📊 *Total Links:* {course_count}
+📂 *Subjects:* {processed_subjects}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+👨‍💻 @MrHacker
+""",
+                    parse_mode='Markdown'
+                )
+            
+            os.remove(file_name)
         else:
-            await update.message.reply_text("❌ No content found for this batch.")
+            await status_msg.edit_text("""
+❌ *No Content Found!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ No videos/content in this batch
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔄 Try another batch with /extract
+""", parse_mode='Markdown')
     
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await status_msg.edit_text(f"""
+❌ *Error Occurred!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ {str(e)[:100]}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔄 Try again with /extract
+""", parse_mode='Markdown')
     
     return ConversationHandler.END
 
@@ -535,12 +737,18 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in user_sessions:
         del user_sessions[user_id]
-        await update.message.reply_text("✅ Logged out successfully!")
+        await update.message.reply_text("""
+✅ *Logged Out Successfully!*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔐 Use /login to login again
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""", parse_mode='Markdown')
     else:
         await update.message.reply_text("❌ You are not logged in.")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Operation cancelled.")
+    await update.message.reply_text("❌ *Operation Cancelled!*", parse_mode='Markdown')
     return ConversationHandler.END
 
 # ======================= MAIN =======================
@@ -548,6 +756,7 @@ def main():
     # Start Flask in a separate thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
+    print("✅ Flask server started")
     
     # Create bot application
     application = Application.builder().token(BOT_TOKEN).build()
@@ -559,8 +768,7 @@ def main():
             CallbackQueryHandler(button_callback, pattern="^login$")
         ],
         states={
-            LOGIN_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_email)],
-            LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_password)],
+            WAITING_LOGIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_login)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -572,7 +780,7 @@ def main():
             CallbackQueryHandler(button_callback, pattern="^extract$")
         ],
         states={
-            BATCH_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, extract_batch)],
+            WAITING_BATCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_extract)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
