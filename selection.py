@@ -1,5 +1,5 @@
-# Utkarsh Extractor Bot – Koyeb Ready (Jan 2025)
-# Uses python-telegram-bot v21+ → No dependency conflict!
+# UTKARSH EXTRACTOR BOT – ONE FILE ONLY – NO KOYEB VARIABLES NEEDED
+# Just change YOUR_BOT_TOKEN below and deploy on Koyeb → DONE!
 
 import os
 import json
@@ -8,17 +8,15 @@ import requests
 import urllib3
 from io import BytesIO
 
-from telegram import Update
+from telegram import Update, ForceReply
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 urllib3.disable_warnings()
 
-BOT_TOKEN = os.environ.get("8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
-if not BOT_TOKEN:
-    print("Add BOT_TOKEN in env!")
-    exit()
+# CHANGE THIS LINE ONLY ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"  # ← PUT YOUR TOKEN HERE
+# ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
-# =================== UTKARSH CORE ===================
 API_URL = "https://application.utkarshapp.com/index.php/data_model"
 COMMON_KEY = b"%!^F&^$)&^$&*$^&"
 COMMON_IV = b"#*v$JvywJvyJDyvJ"
@@ -79,7 +77,7 @@ def get_link(jid, tile_id, course_id):
     d = res.get("data", {})
     urls = d.get("bitrate_urls", [])
     if urls:
-        for i in [3,2,1,0]:
+        for i in [3, 2, 1, 0]:
             if i < len(urls) and urls[i].get("url"):
                 return urls[i]["url"].split("?Expires=")[0]
     link = d.get("link") or d.get("url", "")
@@ -89,155 +87,158 @@ def get_link(jid, tile_id, course_id):
         return f"https://www.youtube.com/embed/{link}"
     return None
 
-async def extract(update: Update, context: ContextTypes.DEFAULT_TYPE, mobile, pwd, batch):
-    global key, iv
-    s = requests.Session()
-    s.mount('https://', requests.adapters.HTTPAdapter(pool_maxsize=100))
+async def extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mobile = context.user_data["mobile"]
+    pwd = context.user_data["pwd"]
+    batch = context.user_data["batch"]
 
-    status = await update.message.reply_text("🔄 Getting token...")
-    
+    s = requests.Session()
+    s.mount('https://', requests.adapters.HTTPAdapter(pool_maxsize=200))
+
+    status = await update.message.reply_text("🔄 Logging in...")
+
     try:
         csrf = s.get("https://online.utkarsh.com/", verify=False, timeout=20).cookies.get('csrf_name')
-        if not csrf: raise Exception("CSRF failed")
+        if not csrf:
+            await status.edit_text("❌ Failed to get token")
+            return
 
-        await status.edit_text("🔐 Logging in...")
-        login_res = s.post("https://online.utkarsh.com/web/Auth/login", data={
+        login = s.post("https://online.utkarsh.com/web/Auth/login", data={
             "mobile": mobile, "password": pwd, "csrf_name": csrf,
             "url": "0", "submit": "LogIn", "device_token": "null"
         }, verify=False, timeout=20).json()
 
-        data = ds(login_res.get("response", {}))
+        data = ds(login.get("response", {}))
         if not data or data.get("status") != 1:
-            await status.edit_text("❌ Login Failed – Wrong Mobile/Password")
+            await status.edit_text("❌ Wrong Mobile or Password!")
             return
 
-        jwt = data["data"]["jwt"]
-        HEADERS["jwt"] = jwt
-
+        HEADERS["jwt"] = data["data"]["jwt"]
         profile = api("/users/get_my_profile", {}, True)
         uid = profile["data"]["id"]
         HEADERS["userid"] = uid
+        global key, iv
         key = "".join(key_chars[int(c)] for c in (uid + "1524567456436545")[:16]).encode()
         iv = "".join(iv_chars[int(c)] for c in (uid + "1524567456436545")[:16]).encode()
 
-        await status.edit_text("📂 Extracting links... (can take 3-10 mins)")
+        await status.edit_text("🔥 Extracting all videos... (2-8 minutes)")
 
-        result = BytesIO()
-        result.write(f"UTKARSH BATCH {batch} – EXTRACTED LINKS\n{'='*50}\n\n".encode())
+        output = BytesIO()
+        output.write(f"UTKARSH BATCH {batch} - ALL LINKS\n{'='*50}\n\n".encode())
         count = 0
 
-        # Get courses
+        # Get main course
         courses_res = s.post("https://online.utkarsh.com/web/Course/tiles_data", data={
             "tile_input": es(json.dumps({"course_id": batch, "parent_id": 0, "tile_id": "15330", "layer": 1, "type": "course_combo", "revert_api": "1#0#0#1"})),
             "csrf_name": csrf
         }, verify=False).json()
-        courses = ds(courses_res.get("response", {}) ).get("data", [])
+        courses = ds(courses_res.get("response", {})).get("data", [])
         if isinstance(courses, dict): courses = [courses]
 
         for course in courses:
             cid = course["id"]
-            cname = course.get("title", "Unknown")
-            result.write(f"\n📂 {cname}\n".encode())
+            cname = course.get("title", "Course")
+            output.write(f"COURSE: {cname}\n\n".encode())
 
             pg = 1
             while True:
-                sub_res = s.post("https://online.utkarsh.com/web/Course/tiles_data", data={
+                subs = s.post("https://online.utkarsh.com/web/Course/tiles_data", data={
                     "tile_input": es(json.dumps({"course_id": cid, "parent_id": cid, "layer": 1, "page": pg, "tile_id": "0", "type": "content", "revert_api": "1#1#0#1"})),
                     "csrf_name": csrf
                 }, verify=False).json()
-                sub_data = ds(sub_res.get("response", {}))
+                sub_data = ds(subs.get("response", {}))
                 if not sub_data or "list" not in sub_data.get("data", {}): break
 
                 for subject in sub_data["data"]["list"]:
                     sid = subject["id"]
                     sname = subject.get("title", "Subject")
-                    result.write(f"\n  📖 {sname}\n".encode())
+                    output.write(f"  ▶ {sname}\n".encode())
 
                     pg2 = 1
                     while True:
-                        topic_res = s.post("https://online.utkarsh.com/web/Course/get_layer_two_data", data={
+                        topics = s.post("https://online.utkarsh.com/web/Course/get_layer_two_data", data={
                             "layer_two_input_data": base64.b64encode(json.dumps({
-                                "course_id": cid, "parent_id": cid, "subject_id": sid,
-                                "topic_id": sid, "layer": 2, "page": pg2, "tile_id": 0,
-                                "type": "content", "revert_api": "1#0#0#1"
+                                "course_id": cid, "parent_id": cid, "subject_id": sid, "topic_id": sid,
+                                "layer": 2, "page": pg2, "tile_id": 0, "type": "content", "revert_api": "1#0#0#1"
                             }).encode()).decode(),
                             "csrf_name": csrf
                         }, verify=False).json()
 
-                        topic_data = ds(topic_res.get("response", {}))
-                        if not topic_data or "list" not in topic_data.get("data", {}): break
+                        tdata = ds(topics.get("response", {}))
+                        if not tdata or "list" not in tdata.get("data", {}): break
 
-                        for topic in topic_data["data"]["list"]:
+                        for topic in tdata["data"]["list"]:
                             tid = topic["id"]
-                            tname = topic.get("title", "Topic")
+                            tname = topic.get("title", "Video")
                             tile_id = topic.get("payload", {}).get("tile_id")
 
-                            if topic.get("has_child") == 1:
-                                # Simple layer 3 & 4 handling (recursive calls removed for speed)
-                                link = get_link(tid, tile_id, cid) if tile_id else None
-                                if link:
-                                    result.write(f"    {tname}:{link}\n".encode())
-                                    count += 1
-                            elif tile_id:
+                            if tile_id:
                                 link = get_link(tid, tile_id, cid)
                                 if link:
-                                    result.write(f"    {tname}:{link}\n".encode())
+                                    output.write(f"    📺 {tname}: {link}\n".encode())
                                     count += 1
 
-                        if pg2 >= topic_data["data"].get("total_page", 1): break
+                        if pg2 >= tdata["data"].get("total_page", 1): break
                         pg2 += 1
 
                 if pg >= sub_data["data"].get("total_page", 1): break
                 pg += 1
 
-        result.write(f"\n{'='*50}\nTOTAL LINKS: {count}\n".encode())
-        result.seek(0)
+        output.write(f"\n{'='*50}\nTOTAL VIDEOS: {count}\n".encode())
+        output.seek(0)
 
         await status.delete()
         await update.message.reply_document(
-            document=("Utkarsh_Batch_" + batch + ".txt", result),
-            caption=f"Batch {batch} → {count} links extracted ✅\nBot by @YourChannel"
+            document=("Utkarsh_Batch_" + batch + ".txt", output),
+            caption=f"Batch {batch} → {count} videos extracted ✅\nFree Bot by @YourChannel"
         )
 
     except Exception as e:
         await status.edit_text(f"Error: {str(e)}")
 
-# =============== BOT HANDLERS ===============
+# ================= BOT COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ *Utkarsh Instant Extractor Bot* ⚡\n\n"
-        "Send /extract → Mobile → Password → Batch ID\n"
-        "Get all video links in .txt file instantly!\n\n"
-        "Working 100% – January 2025 🔥",
+        "⚡ *UTKARSH FULL EXTRACTOR BOT* ⚡\n\n"
+        "Send /extract and follow steps\n"
+        "Get ALL video links in 5 minutes!\n\n"
+        "Working 100% - January 2025 🔥",
         parse_mode="Markdown"
     )
 
 async def extract_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send Mobile/Email:", reply_markup=update.message.reply_markup.force_reply)
+    await update.message.reply_text("Send Mobile Number or Email:", reply_markup=ForceReply(force_reply=True))
     context.user_data["step"] = "mobile"
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("step")
+async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "step" not in context.user_data:
+        return
+
     text = update.message.text.strip()
+    step = context.user_data["step"]
 
     if step == "mobile":
         context.user_data["mobile"] = text
-        await update.message.reply_text("Send Password:", reply_markup=update.message.reply_markup.force_reply)
+        await update.message.reply_text("Send Password:", reply_markup=ForceReply(force_reply=True))
         context.user_data["step"] = "pwd"
+
     elif step == "pwd":
         context.user_data["pwd"] = text
-        await update.message.reply_text("Send Batch ID:", reply_markup=update.message.reply_markup.force_reply)
+        await update.message.reply_text("Send Batch ID (Course ID):", reply_markup=ForceReply(force_reply=True))
         context.user_data["step"] = "batch"
+
     elif step == "batch":
-        await update.message.reply_text("Starting extraction... Hold on! ⏳")
-        await extract(update, context, context.user_data["mobile"], context.user_data["pwd"], text)
+        context.user_data["batch"] = text
+        await update.message.reply_text("Starting extraction... Please wait 3-8 minutes ⏳")
+        await extract(update, context)
         context.user_data.clear()
 
-# =============== RUN ===============
-app = Application.builder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("extract", extract_cmd))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+# ================= RUN BOT =================
+if __name__ == "__main__":
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("extract", extract_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
 
-print("Utkarsh Bot Started!")
-app.run_polling(drop_pending_updates=True)
+    print("UTKARSH BOT IS LIVE!")
+    app.run_polling(drop_pending_updates=True)
