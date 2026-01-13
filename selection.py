@@ -22,13 +22,15 @@ BASE_URL = "https://online.utkarsh.com/"
 LOGIN_URL = BASE_URL + "web/Auth/login"
 TILES_DATA_URL = BASE_URL + "web/Course/tiles_data"
 LAYER_TWO_DATA_URL = BASE_URL + "web/Course/get_layer_two_data"
-# ================= HEADERS =================
+
+# ================ HEADERS =================
 h = {
     "X-Requested-With": "XMLHttpRequest",
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "User-Agent": "Mozilla/5.0"
 }
-csrf_token =
+
+csrf_token = None
 
 # ================= CRYPTO =================
 def encrypt_stream(plain):
@@ -198,4 +200,3 @@ if __name__ == "__main__":
         except Exception as e:
             print("Polling error:", e)
             time.sleep(5)
-
