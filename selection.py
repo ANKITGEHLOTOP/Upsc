@@ -1,6 +1,5 @@
-import os
-import json
 import time
+import json
 import requests
 import telebot
 from Crypto.Cipher import AES
@@ -11,10 +10,10 @@ import traceback
 
 urllib3.disable_warnings()
 
-# ================= CONFIG =================
-BOT_TOKEN = os.getenv("8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
-UT_EMAIL = os.getenv("7891745633")
-UT_PASSWORD = os.getenv("Sitar@123")
+# ================= HARD-CODED CONFIG =================
+BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"   # ← PUT REAL TOKEN
+UT_EMAIL = "7891745633"
+UT_PASSWORD = "Sitar@123"
 
 API_URL = "https://application.utkarshapp.com/index.php/data_model"
 
@@ -32,7 +31,7 @@ HEADERS = {
     "version": "152"
 }
 
-# ================= UTILS =================
+# ================= CRYPTO =================
 def encrypt(data):
     cipher = AES.new(COMMON_KEY, AES.MODE_CBC, COMMON_IV)
     raw = pad(json.dumps(data, separators=(",", ":")).encode(), 16)
@@ -45,14 +44,6 @@ def decrypt(enc):
         return unpad(cipher.decrypt(raw), 16).decode()
     except Exception:
         return None
-
-def safe_post(path, payload):
-    try:
-        r = requests.post(API_URL + path, headers=HEADERS, data=encrypt(payload), timeout=15)
-        dec = decrypt(r.text)
-        return json.loads(dec) if dec else {}
-    except Exception:
-        return {}
 
 # ================= LOGIN =================
 def utkarsh_login():
@@ -75,22 +66,22 @@ def utkarsh_login():
             "device_token": "null"
         }
 
-        h = {
+        headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Content-Type": "application/x-www-form-urlencoded"
         }
 
-        res = s.post(login_url, data=payload, headers=h, timeout=15)
+        res = s.post(login_url, data=payload, headers=headers, timeout=15)
 
         try:
             js = res.json()
         except Exception:
-            return False, "Login JSON invalid"
+            return False, "Login response not JSON"
 
         if not isinstance(js, dict) or "response" not in js:
             return False, f"Unexpected login response: {js}"
 
-        return True, "Login OK"
+        return True, "Login successful"
 
     except Exception as e:
         return False, str(e)
@@ -103,28 +94,27 @@ def start(m):
     bot.reply_to(
         m,
         "✅ Bot is running\n"
-        "⚠️ Scraping runs only on command\n"
+        "⚠️ Hard-coded credentials mode\n"
         "Use responsibly."
     )
 
 @bot.message_handler(commands=["ping"])
 def ping(m):
-    bot.reply_to(m, "🏓 Pong! Bot alive.")
+    bot.reply_to(m, "🏓 Pong! Bot is alive.")
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print("🚀 Starting Utkarsh Bot (Koyeb Safe Mode)")
+    print("🚀 Starting Utkarsh Bot (No-ENV Mode)")
 
-    if not BOT_TOKEN or not UT_EMAIL or not UT_PASSWORD:
-        print("❌ ENV vars missing")
-    else:
-        ok, msg = utkarsh_login()
-        print("Login:", msg)
+    # Login once (non-fatal)
+    ok, msg = utkarsh_login()
+    print("Login:", msg)
 
-    # KEEP APP ALIVE (IMPORTANT FOR KOYEB)
+    # KEEP ALIVE FOR KOYEB
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        except Exception:
+        except Exception as e:
+            print("Polling error:", e)
             traceback.print_exc()
             time.sleep(5)
