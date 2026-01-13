@@ -1,75 +1,72 @@
-import time
 import json
+import time
 import requests
 import telebot
+import traceback
+import urllib3
+from base64 import b64encode, b64decode
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
-from base64 import b64encode, b64decode
-import urllib3
-import traceback
 
 urllib3.disable_warnings()
 
-# ================= HARD CODED =================
+# ================= HARD CODED CREDS =================
 BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"
 UT_EMAIL = "7891745633"
 UT_PASSWORD = "Sitar@123"
 
-API_URL = "https://application.utkarshapp.com/index.php/data_model"
+# ================= SESSION / URLS =================
+session = requests.Session()
 
-COMMON_KEY = b"%!^F&^$)&^$&*$^&"
-COMMON_IV = b"#*v$JvywJvyJDyvJ"
+BASE_URL = "https://online.utkarsh.com/"
+LOGIN_URL = BASE_URL + "web/Auth/login"
+TILES_DATA_URL = BASE_URL + "web/Course/tiles_data"
+LAYER_TWO_DATA_URL = BASE_URL + "web/Course/get_layer_two_data"
 
-HEADERS = {
-    "Authorization": "Bearer 152#svf346t45ybrer34yredk76t",
-    "Content-Type": "text/plain; charset=UTF-8",
-    "devicetype": "1",
-    "host": "application.utkarshapp.com",
-    "lang": "1",
-    "user-agent": "okhttp/4.9.0",
-    "userid": "0",
-    "version": "152"
+# ================= HEADERS =================
+h = {
+    "X-Requested-With": "XMLHttpRequest",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "User-Agent": "Mozilla/5.0"
 }
 
-# ================= CRYPTO =================
-def encrypt(data):
-    cipher = AES.new(COMMON_KEY, AES.MODE_CBC, COMMON_IV)
-    raw = pad(json.dumps(data, separators=(",", ":")).encode(), 16)
-    return b64encode(cipher.encrypt(raw)).decode() + ":"
+csrf_token = None
 
-def decrypt(enc):
+# ================= CRYPTO (ORIGINAL) =================
+def encrypt_stream(plain):
+    key = '%!$!%_$&!%F)&^!^'.encode()
+    iv = '#*y*#2yJ*#$wJv*v'.encode()
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return b64encode(cipher.encrypt(pad(plain.encode(), 16))).decode()
+
+def decrypt_stream(enc):
     try:
-        cipher = AES.new(COMMON_KEY, AES.MODE_CBC, COMMON_IV)
-        raw = b64decode(enc.split(":")[0])
-        return unpad(cipher.decrypt(raw), 16).decode()
-    except Exception:
+        key = '%!$!%_$&!%F)&^!^'.encode()
+        iv = '#*y*#2yJ*#$wJv*v'.encode()
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        raw = cipher.decrypt(b64decode(enc))
+        dec = raw.decode(errors="ignore")
+
+        # clean garbage till valid JSON
+        for i in range(len(dec), 0, -1):
+            try:
+                return json.loads(dec[:i])
+            except:
+                pass
+    except:
         return None
 
-def api_post(path, payload):
-    try:
-        r = requests.post(API_URL + path, headers=HEADERS, data=encrypt(payload), timeout=20)
-        dec = decrypt(r.text)
-        return json.loads(dec) if dec else {}
-    except Exception:
-        return {}
-
 # ================= LOGIN =================
-session = None
-
 def utkarsh_login():
-    global session
+    global csrf_token
     try:
-        s = requests.Session()
-        base = "https://online.utkarsh.com/"
-        login_url = base + "web/Auth/login"
-
-        r = s.get(base, timeout=10)
-        csrf = r.cookies.get("csrf_name")
-        if not csrf:
+        r1 = session.get(BASE_URL, timeout=10)
+        csrf_token = r1.cookies.get("csrf_name")
+        if not csrf_token:
             return False, "CSRF missing"
 
         payload = {
-            "csrf_name": csrf,
+            "csrf_name": csrf_token,
             "mobile": UT_EMAIL,
             "password": UT_PASSWORD,
             "url": "0",
@@ -77,18 +74,16 @@ def utkarsh_login():
             "device_token": "null"
         }
 
-        h = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
+        r2 = session.post(LOGIN_URL, data=payload, headers=h, timeout=15)
 
-        res = s.post(login_url, data=payload, headers=h, timeout=15)
-        js = res.json()
+        try:
+            js = r2.json()
+        except:
+            return False, "Login response not JSON"
 
         if not isinstance(js, dict) or "response" not in js:
             return False, f"Login failed: {js}"
 
-        session = s
         return True, "Login OK"
 
     except Exception as e:
@@ -105,7 +100,7 @@ def start(m):
 def ping(m):
     bot.reply_to(m, "🏓 Alive")
 
-# ================= EXTRACT =================
+# ================= EXTRACT (REAL FLOW) =================
 @bot.message_handler(commands=["extract"])
 def extract(m):
     try:
@@ -122,52 +117,71 @@ def extract(m):
             bot.reply_to(m, f"❌ Login failed:\n{msg}")
             return
 
-        # STEP 1: batch tiles
-        payload = {
+        # -------- LAYER 1 --------
+        d1 = {
             "course_id": batch_id,
+            "revert_api": "1#0#0#1",
             "parent_id": 0,
-            "layer": 1,
             "tile_id": "15330",
-            "type": "course_combo",
-            "revert_api": "1#0#0#1"
+            "layer": 1,
+            "type": "course_combo"
         }
 
-        data = api_post("/course/get_course_tiles", payload)
-        items = data.get("data", [])
+        enc1 = encrypt_stream(json.dumps(d1))
+        r1 = session.post(
+            TILES_DATA_URL,
+            headers=h,
+            data={"tile_input": enc1, "csrf_name": csrf_token}
+        ).json()
 
-        if not items:
+        dr1 = decrypt_stream(r1.get("response"))
+        if not dr1 or "data" not in dr1:
             bot.reply_to(m, "❌ No data found for this batch")
             return
 
         sent = 0
 
-        for item in items:
-            title = item.get("title", "Untitled")
-            cid = item.get("id")
+        # -------- LAYER 2 --------
+        for subj in dr1["data"]:
+            sid = subj.get("id")
+            sname = subj.get("title")
 
-            meta = api_post(
-                "/meta_distributer/on_request_meta_source",
-                {
-                    "course_id": cid,
-                    "type": "video",
-                    "download_click": "0",
-                    "device_id": "x",
-                    "device_name": "x",
-                    "name": f"{cid}_0_0"
-                }
-            )
+            d2 = {
+                "course_id": batch_id,
+                "parent_id": batch_id,
+                "layer": 2,
+                "page": 1,
+                "revert_api": "1#0#0#1",
+                "subject_id": sid,
+                "tile_id": 0,
+                "topic_id": sid,
+                "type": "content"
+            }
 
-            urls = meta.get("data", {}).get("bitrate_urls", [])
+            enc2 = b64encode(json.dumps(d2).encode()).decode()
+            r2 = session.post(
+                LAYER_TWO_DATA_URL,
+                headers=h,
+                data={"layer_two_input_data": enc2, "csrf_name": csrf_token}
+            ).json()
 
-            for u in urls:
-                link = u.get("url")
-                if link:
-                    clean = link.split("?Expires=")[0]
-                    bot.send_message(m.chat.id, f"<b>{title}</b>\n{clean}")
-                    sent += 1
-                    time.sleep(0.3)
+            dr2 = decrypt_stream(r2.get("response"))
+            if not dr2 or "data" not in dr2:
+                continue
 
-        bot.reply_to(m, f"✅ Extraction done\nLinks sent: {sent}")
+            # -------- LAYER 3 --------
+            for topic in dr2["data"]["list"]:
+                tid = topic.get("id")
+                tname = topic.get("title")
+
+                bot.send_message(
+                    m.chat.id,
+                    f"<b>{sname}</b>\n{tname}"
+                )
+                sent += 1
+                time.sleep(0.25)
+
+        bot.reply_to(m, f"✅ Done\nItems found: {sent}")
 
     except Exception as e:
         traceback.print_exc()
@@ -175,11 +189,11 @@ def extract(m):
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print("🚀 Bot starting (extract enabled)")
+    print("🚀 Utkarsh bot starting (REAL FLOW)")
 
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=60)
         except Exception as e:
-            print("Polling crash:", e)
+            print("Polling error:", e)
             time.sleep(5)
