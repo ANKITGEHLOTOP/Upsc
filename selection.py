@@ -2,7 +2,6 @@ import os
 import json
 import requests
 import telebot
-from telebot import types
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
 from base64 import b64decode, b64encode
@@ -15,6 +14,10 @@ urllib3.disable_warnings()
 
 # ===== BOT TOKEN =====
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
+
+# ===== AUTO LOGIN CREDENTIALS =====
+AUTO_MOBILE = "7891745633"
+AUTO_PASSWORD = "Sitar@123"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -35,15 +38,8 @@ BASE_HEADERS = {
     "version": "152"
 }
 
-# User sessions and states storage
-user_sessions = {}
-user_states = {}
-
-# States
-STATE_NONE = 0
-STATE_LOGIN_EMAIL = 1
-STATE_LOGIN_PASSWORD = 2
-STATE_BATCH_ID = 3
+# Global session storage
+global_session = None
 
 # ===== CRYPTO FUNCTIONS =====
 def enc(d, key, iv, c=False):
@@ -86,6 +82,76 @@ def es(d):
         return b64encode(AES.new(b'%!$!%_$&!%F)&^!^', AES.MODE_CBC, b'#*y*#2yJ*#$wJv*v').encrypt(pad(d.encode(), 16))).decode()
     except:
         return None
+
+# ===== LOGIN FUNCTION =====
+def do_login():
+    global global_session
+    
+    try:
+        s = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        s.mount('https://', adapter)
+        
+        csrf_resp = s.get("https://online.utkarsh.com/", verify=False, timeout=15)
+        cs = csrf_resp.cookies.get('csrf_name')
+        
+        if not cs:
+            return False, "CSRF Failed"
+        
+        h = {
+            'Host': 'online.utkarsh.com',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': 'Mozilla/5.0 Chrome/119.0.0.0'
+        }
+        
+        login_data = {
+            'csrf_name': cs,
+            'mobile': AUTO_MOBILE,
+            'url': '0',
+            'password': AUTO_PASSWORD,
+            'submit': 'LogIn',
+            'device_token': 'null'
+        }
+        
+        r = s.post("https://online.utkarsh.com/web/Auth/login", data=login_data, headers=h, verify=False, timeout=15).json()
+        dr = ds(r.get("response"))
+        
+        if not dr or dr.get("status") != 200:
+            return False, "Login Failed"
+        
+        h["token"] = dr.get("token")
+        h["jwt"] = dr["data"]["jwt"]
+        
+        api_headers = BASE_HEADERS.copy()
+        api_headers["jwt"] = h["jwt"]
+        
+        p = api_call("/users/get_my_profile", {}, api_headers, None, None, True)
+        
+        if not p.get("data"):
+            return False, "Profile Failed"
+        
+        uid = str(p["data"]["id"])
+        api_headers["userid"] = uid
+        
+        key = "".join(key_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
+        iv = "".join(iv_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
+        
+        global_session = {
+            'session': s,
+            'web_headers': h,
+            'api_headers': api_headers,
+            'csrf': cs,
+            'key': key,
+            'iv': iv,
+            'uid': uid
+        }
+        
+        return True, uid
+        
+    except Exception as e:
+        return False, str(e)
 
 # ===== EXTRACTION FUNCTIONS =====
 def get_link(ji, jti, fi, headers, key, iv):
@@ -171,14 +237,20 @@ def extract_layer4(s, h, cs, fi, sfi, ti, tn, headers, key, iv, results, count_r
         except:
             break
 
-def full_extraction(session_data, batch_id):
-    """Main extraction function"""
-    s = session_data['session']
-    h = session_data['web_headers']
-    cs = session_data['csrf']
-    headers = session_data['api_headers']
-    key = session_data['key']
-    iv = session_data['iv']
+def full_extraction(batch_id):
+    global global_session
+    
+    if not global_session:
+        success, msg = do_login()
+        if not success:
+            return None, f"Login failed: {msg}"
+    
+    s = global_session['session']
+    h = global_session['web_headers']
+    cs = global_session['csrf']
+    headers = global_session['api_headers']
+    key = global_session['key']
+    iv = global_session['iv']
     
     results = []
     count_ref = [0]
@@ -192,11 +264,19 @@ def full_extraction(session_data, batch_id):
         dr3 = ds(r.get("response"))
         
         if not dr3:
-            return None, "❌ Course not found or access denied!"
+            # Try re-login
+            global_session = None
+            success, msg = do_login()
+            if not success:
+                return None, "❌ Session expired and re-login failed!"
+            return full_extraction(batch_id)  # Retry
         
         courses = dr3.get("data", [])
         if isinstance(courses, dict):
             courses = [courses]
+        
+        if not courses:
+            return None, "❌ Course not found or no access!"
         
         for c in courses:
             fi, tn = c.get("id"), c.get("title", "Course")
@@ -269,168 +349,41 @@ def send_welcome(message):
     welcome_msg = """
 🎓 *UTKARSH EXTRACTOR BOT* 🎓
 
-Welcome! This bot extracts video links from Utkarsh courses.
-
 *Commands:*
-/login - Login to your Utkarsh account
-/extract - Extract links from a batch
-/logout - Logout from current session
+/extract `<batch_id>` - Extract links
 /status - Check login status
-/cancel - Cancel current operation
 
-*How to use:*
-1️⃣ Use /login to authenticate
-2️⃣ Use /extract and provide Batch ID
-3️⃣ Wait for extraction to complete
-4️⃣ Download the text file with links
+*Example:*
+`/extract 12345`
 
-⚠️ _Use responsibly!_
+Just send me a Batch ID and I'll extract all links!
     """
     bot.reply_to(message, welcome_msg, parse_mode='Markdown')
 
-@bot.message_handler(commands=['cancel'])
-def cancel_operation(message):
-    user_id = message.from_user.id
-    user_states[user_id] = STATE_NONE
-    bot.reply_to(message, "❌ Operation cancelled.")
-
-@bot.message_handler(commands=['login'])
-def login_start(message):
-    user_id = message.from_user.id
-    
-    if user_id in user_sessions:
-        bot.reply_to(message, "✅ You're already logged in!\n\nUse /logout first to login with different account.")
-        return
-    
-    user_states[user_id] = STATE_LOGIN_EMAIL
-    bot.reply_to(message, "📱 Enter your *Mobile Number/Email*:", parse_mode='Markdown')
-
-@bot.message_handler(commands=['logout'])
-def logout(message):
-    user_id = message.from_user.id
-    if user_id in user_sessions:
-        del user_sessions[user_id]
-        bot.reply_to(message, "✅ Logged out successfully!")
-    else:
-        bot.reply_to(message, "ℹ️ You're not logged in.")
-
 @bot.message_handler(commands=['status'])
 def status(message):
-    user_id = message.from_user.id
-    if user_id in user_sessions:
-        session = user_sessions[user_id]
+    global global_session
+    if global_session:
         bot.reply_to(message, 
             f"✅ *Logged In*\n\n"
-            f"📧 Email: {session.get('email', 'N/A')}\n"
-            f"🆔 User ID: {session.get('uid', 'N/A')}",
+            f"📱 Mobile: {AUTO_MOBILE}\n"
+            f"🆔 User ID: {global_session.get('uid', 'N/A')}",
             parse_mode='Markdown'
         )
     else:
-        bot.reply_to(message, "❌ Not logged in. Use /login")
+        bot.reply_to(message, "⏳ Not logged in yet. Will auto-login on first extract.")
 
 @bot.message_handler(commands=['extract'])
-def extract_start(message):
-    user_id = message.from_user.id
-    
-    if user_id not in user_sessions:
-        bot.reply_to(message, "❌ Please /login first!")
+def extract_cmd(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Usage: /extract <batch_id>\n\nExample: `/extract 12345`", parse_mode='Markdown')
         return
     
-    user_states[user_id] = STATE_BATCH_ID
-    bot.reply_to(message, "📚 Enter the *Batch ID* to extract:", parse_mode='Markdown')
-
-def do_login(message, email, password):
-    user_id = message.from_user.id
-    
-    status_msg = bot.reply_to(message, "⏳ Logging in, please wait...")
-    
-    try:
-        s = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
-        s.mount('https://', adapter)
-        
-        csrf_resp = s.get("https://online.utkarsh.com/", verify=False, timeout=15)
-        cs = csrf_resp.cookies.get('csrf_name')
-        
-        if not cs:
-            bot.edit_message_text("❌ Failed to get CSRF token. Try again later.", 
-                                  message.chat.id, status_msg.message_id)
-            return
-        
-        h = {
-            'Host': 'online.utkarsh.com',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'X-Requested-With': 'XMLHttpRequest',
-            'User-Agent': 'Mozilla/5.0 Chrome/119.0.0.0'
-        }
-        
-        login_data = {
-            'csrf_name': cs,
-            'mobile': email,
-            'url': '0',
-            'password': password,
-            'submit': 'LogIn',
-            'device_token': 'null'
-        }
-        
-        r = s.post("https://online.utkarsh.com/web/Auth/login", data=login_data, headers=h, verify=False, timeout=15).json()
-        dr = ds(r.get("response"))
-        
-        if not dr or dr.get("status") != 200:
-            bot.edit_message_text("❌ Login failed! Check your credentials.", 
-                                  message.chat.id, status_msg.message_id)
-            return
-        
-        h["token"] = dr.get("token")
-        h["jwt"] = dr["data"]["jwt"]
-        
-        api_headers = BASE_HEADERS.copy()
-        api_headers["jwt"] = h["jwt"]
-        
-        p = api_call("/users/get_my_profile", {}, api_headers, None, None, True)
-        
-        if not p.get("data"):
-            bot.edit_message_text("❌ Failed to get profile!", 
-                                  message.chat.id, status_msg.message_id)
-            return
-        
-        uid = str(p["data"]["id"])
-        api_headers["userid"] = uid
-        
-        key = "".join(key_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
-        iv = "".join(iv_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
-        
-        user_sessions[user_id] = {
-            'session': s,
-            'web_headers': h,
-            'api_headers': api_headers,
-            'csrf': cs,
-            'key': key,
-            'iv': iv,
-            'uid': uid,
-            'email': email
-        }
-        
-        bot.edit_message_text(
-            f"✅ *Login Successful!*\n\n"
-            f"👤 User ID: `{uid}`\n\n"
-            f"Use /extract to extract batch links.",
-            message.chat.id, status_msg.message_id,
-            parse_mode='Markdown'
-        )
-        
-    except Exception as e:
-        bot.edit_message_text(f"❌ Error: {str(e)}", 
-                              message.chat.id, status_msg.message_id)
+    batch_id = args[1].strip()
+    do_extract(message, batch_id)
 
 def do_extract(message, batch_id):
-    user_id = message.from_user.id
-    
-    if user_id not in user_sessions:
-        bot.reply_to(message, "❌ Session expired! Please /login again.")
-        return
-    
     status_msg = bot.reply_to(message, 
         f"⏳ *Extracting Batch {batch_id}...*\n\n"
         f"This may take several minutes. Please wait!",
@@ -438,7 +391,7 @@ def do_extract(message, batch_id):
     )
     
     try:
-        results, count = full_extraction(user_sessions[user_id], batch_id)
+        results, count = full_extraction(batch_id)
         
         if results is None:
             bot.edit_message_text(f"❌ {count}", message.chat.id, status_msg.message_id)
@@ -462,46 +415,35 @@ def do_extract(message, batch_id):
         bot.delete_message(message.chat.id, status_msg.message_id)
         
     except Exception as e:
-        bot.edit_message_text(f"❌ Error during extraction: {str(e)}", 
-                              message.chat.id, status_msg.message_id)
+        bot.edit_message_text(f"❌ Error: {str(e)}", message.chat.id, status_msg.message_id)
+
+@bot.message_handler(func=lambda message: message.text and message.text.isdigit())
+def handle_batch_id(message):
+    """If user sends just a number, treat it as batch ID"""
+    batch_id = message.text.strip()
+    
+    # Run in thread to avoid blocking
+    thread = threading.Thread(target=do_extract, args=(message, batch_id))
+    thread.start()
 
 @bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    user_id = message.from_user.id
-    state = user_states.get(user_id, STATE_NONE)
-    text = message.text.strip()
-    
-    if state == STATE_LOGIN_EMAIL:
-        user_states[user_id] = STATE_LOGIN_PASSWORD
-        user_sessions[user_id + 1000000000] = {'temp_email': text}  # Temp storage
-        bot.reply_to(message, "🔑 Enter your *Password*:", parse_mode='Markdown')
-    
-    elif state == STATE_LOGIN_PASSWORD:
-        user_states[user_id] = STATE_NONE
-        temp_data = user_sessions.pop(user_id + 1000000000, {})
-        email = temp_data.get('temp_email', '')
-        
-        # Run login in thread to avoid blocking
-        thread = threading.Thread(target=do_login, args=(message, email, text))
-        thread.start()
-    
-    elif state == STATE_BATCH_ID:
-        user_states[user_id] = STATE_NONE
-        
-        # Run extraction in thread to avoid blocking
-        thread = threading.Thread(target=do_extract, args=(message, text))
-        thread.start()
-    
-    else:
-        bot.reply_to(message, "❓ Unknown command. Use /help to see available commands.")
+def handle_other(message):
+    bot.reply_to(message, "❓ Send me a Batch ID (number) or use /extract <batch_id>")
 
 # ===== MAIN =====
 if __name__ == "__main__":
     print("🚀 Starting Utkarsh Extractor Bot...")
+    print(f"📱 Auto-login: {AUTO_MOBILE}")
+    
+    # Pre-login at startup
+    print("⏳ Logging in...")
+    success, msg = do_login()
+    if success:
+        print(f"✅ Logged in! User ID: {msg}")
+    else:
+        print(f"⚠️ Initial login failed: {msg} (will retry on first request)")
+    
     print("✅ Bot is running!")
     
-    # Remove webhook if any
     bot.remove_webhook()
-    
-    # Start polling
     bot.infinity_polling(timeout=60, long_polling_timeout=60)
