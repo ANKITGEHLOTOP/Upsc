@@ -10,6 +10,14 @@ from base64 import b64decode, b64encode
 import base64
 import urllib3
 import io
+import logging
+
+# Enable logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 urllib3.disable_warnings()
 
@@ -51,7 +59,7 @@ def dec(d, key, iv, c=False):
     except:
         return None
 
-def api(p, d, headers, key, iv, c=False):
+def api_call(p, d, headers, key, iv, c=False):
     try:
         r = requests.post(f"{API_URL}{p}", headers=headers, data=enc(d, key, iv, c), verify=False, timeout=30)
         x = dec(r.text, key, iv, c)
@@ -84,10 +92,10 @@ def es(d):
 # ===== EXTRACTION FUNCTIONS =====
 def get_link(ji, jti, fi, headers, key, iv):
     try:
-        r = api("/meta_distributer/on_request_meta_source", {
+        r = api_call("/meta_distributer/on_request_meta_source", {
             "course_id": fi, "device_id": "x", "device_name": "x",
             "download_click": "0", "name": f"{ji}_0_0", "tile_id": jti, "type": "video"
-        }, headers, key, iv)
+        }, headers, key, iv, False)
         d = r.get("data", {})
         if not d:
             return None
@@ -105,7 +113,7 @@ def get_link(ji, jti, fi, headers, key, iv):
         pass
     return None
 
-def extract_layer3(s, h, cs, fi, sfi, ti, tn, headers, key, iv, results):
+def extract_layer3(s, h, cs, fi, sfi, ti, tn, headers, key, iv, results, count_ref):
     pg = 1
     while True:
         try:
@@ -124,18 +132,19 @@ def extract_layer3(s, h, cs, fi, sfi, ti, tn, headers, key, iv, results):
                 ji, jt, p = i.get("id"), i.get("title", "?"), i.get("payload", {})
                 jti = p.get("tile_id")
                 if i.get("has_child") == 1:
-                    extract_layer4(s, h, cs, fi, sfi, ji, f"{tn}/{jt}", headers, key, iv, results)
+                    extract_layer4(s, h, cs, fi, sfi, ji, f"{tn}/{jt}", headers, key, iv, results, count_ref)
                 elif ji and jti:
                     lk = get_link(ji, jti, fi, headers, key, iv)
                     if lk:
                         results.append(f"{tn}/{jt}:{lk}")
+                        count_ref[0] += 1
             if pg >= dr["data"].get("total_page", 1):
                 break
             pg += 1
         except:
             break
 
-def extract_layer4(s, h, cs, fi, sfi, ti, tn, headers, key, iv, results):
+def extract_layer4(s, h, cs, fi, sfi, ti, tn, headers, key, iv, results, count_ref):
     pg = 1
     while True:
         try:
@@ -157,6 +166,7 @@ def extract_layer4(s, h, cs, fi, sfi, ti, tn, headers, key, iv, results):
                     lk = get_link(ji, jti, fi, headers, key, iv)
                     if lk:
                         results.append(f"{tn}/{jt}:{lk}")
+                        count_ref[0] += 1
             if pg >= dr["data"].get("total_page", 1):
                 break
             pg += 1
@@ -173,131 +183,136 @@ def full_extraction(session_data, batch_id):
     iv = session_data['iv']
     
     results = []
+    count_ref = [0]  # Using list to pass by reference
     results.append(f"⚡ UTKARSH EXTRACTOR - Batch {batch_id}")
     results.append("=" * 40)
     
-    # Get course
-    d3 = {"course_id": batch_id, "revert_api": "1#0#0#1", "parent_id": 0, "tile_id": "15330", "layer": 1, "type": "course_combo"}
-    r = s.post("https://online.utkarsh.com/web/Course/tiles_data",
-               headers=h, data={'tile_input': es(json.dumps(d3)), 'csrf_name': cs}, verify=False, timeout=30).json()
-    dr3 = ds(r.get("response"))
-    
-    if not dr3:
-        return None, "❌ Course not found or access denied!"
-    
-    courses = dr3.get("data", [])
-    if isinstance(courses, dict):
-        courses = [courses]
-    
-    count = 0
-    for c in courses:
-        fi, tn = c.get("id"), c.get("title", "Course")
-        results.append(f"\n📂 {tn}")
+    try:
+        # Get course
+        d3 = {"course_id": batch_id, "revert_api": "1#0#0#1", "parent_id": 0, "tile_id": "15330", "layer": 1, "type": "course_combo"}
+        r = s.post("https://online.utkarsh.com/web/Course/tiles_data",
+                   headers=h, data={'tile_input': es(json.dumps(d3)), 'csrf_name': cs}, verify=False, timeout=30).json()
+        dr3 = ds(r.get("response"))
         
-        pg = 1
-        while True:
-            d5 = {"course_id": fi, "layer": 1, "page": pg, "parent_id": fi,
-                  "revert_api": "1#1#0#1", "tile_id": "0", "type": "content"}
-            r = s.post("https://online.utkarsh.com/web/Course/tiles_data",
-                       headers=h, data={'tile_input': es(json.dumps(d5)), 'csrf_name': cs}, verify=False, timeout=30).json()
-            dr = ds(r.get("response"))
-            if not dr:
-                break
-            subs = dr.get("data", {}).get("list", [])
-            if not subs:
-                break
+        if not dr3:
+            return None, "❌ Course not found or access denied!"
+        
+        courses = dr3.get("data", [])
+        if isinstance(courses, dict):
+            courses = [courses]
+        
+        for c in courses:
+            fi, tn = c.get("id"), c.get("title", "Course")
+            results.append(f"\n📂 {tn}")
             
-            for sub in subs:
-                sfi, sfn = sub.get("id"), sub.get("title", "Subject")
-                results.append(f"\n  📖 {sfn}")
+            pg = 1
+            while True:
+                d5 = {"course_id": fi, "layer": 1, "page": pg, "parent_id": fi,
+                      "revert_api": "1#1#0#1", "tile_id": "0", "type": "content"}
+                r = s.post("https://online.utkarsh.com/web/Course/tiles_data",
+                           headers=h, data={'tile_input': es(json.dumps(d5)), 'csrf_name': cs}, verify=False, timeout=30).json()
+                dr = ds(r.get("response"))
+                if not dr:
+                    break
+                subs = dr.get("data", {}).get("list", [])
+                if not subs:
+                    break
                 
-                pg2 = 1
-                while True:
-                    d7 = {"course_id": fi, "parent_id": fi, "layer": 2, "page": pg2,
-                          "revert_api": "1#0#0#1", "subject_id": sfi, "tile_id": 0, "topic_id": sfi, "type": "content"}
-                    r = s.post("https://online.utkarsh.com/web/Course/get_layer_two_data",
-                               headers=h, data={'layer_two_input_data': base64.b64encode(json.dumps(d7).encode()).decode(),
-                                                'csrf_name': cs}, verify=False, timeout=30).json()
-                    dr = ds(r.get("response"))
-                    if not dr:
-                        break
-                    tops = dr.get("data", {}).get("list", [])
-                    if not tops:
-                        break
+                for sub in subs:
+                    sfi, sfn = sub.get("id"), sub.get("title", "Subject")
+                    results.append(f"\n  📖 {sfn}")
                     
-                    for t in tops:
-                        ti, tt = t.get("id"), t.get("title", "Topic")
-                        p = t.get("payload", {})
-                        jti = p.get("tile_id")
+                    pg2 = 1
+                    while True:
+                        d7 = {"course_id": fi, "parent_id": fi, "layer": 2, "page": pg2,
+                              "revert_api": "1#0#0#1", "subject_id": sfi, "tile_id": 0, "topic_id": sfi, "type": "content"}
+                        r = s.post("https://online.utkarsh.com/web/Course/get_layer_two_data",
+                                   headers=h, data={'layer_two_input_data': base64.b64encode(json.dumps(d7).encode()).decode(),
+                                                    'csrf_name': cs}, verify=False, timeout=30).json()
+                        dr = ds(r.get("response"))
+                        if not dr:
+                            break
+                        tops = dr.get("data", {}).get("list", [])
+                        if not tops:
+                            break
                         
-                        if t.get("has_child") == 1:
-                            extract_layer3(s, h, cs, fi, sfi, ti, f"{sfn}/{tt}", headers, key, iv, results)
-                        elif ti and jti:
-                            lk = get_link(ti, jti, fi, headers, key, iv)
-                            if lk:
-                                results.append(f"{sfn}/{tt}:{lk}")
-                                count += 1
-                    
-                    if pg2 >= dr.get("data", {}).get("total_page", 1):
-                        break
-                    pg2 += 1
-            
-            if pg >= dr.get("data", {}).get("total_page", 1):
-                break
-            pg += 1
+                        for t in tops:
+                            ti, tt = t.get("id"), t.get("title", "Topic")
+                            p = t.get("payload", {})
+                            jti = p.get("tile_id")
+                            
+                            if t.get("has_child") == 1:
+                                extract_layer3(s, h, cs, fi, sfi, ti, f"{sfn}/{tt}", headers, key, iv, results, count_ref)
+                            elif ti and jti:
+                                lk = get_link(ti, jti, fi, headers, key, iv)
+                                if lk:
+                                    results.append(f"{sfn}/{tt}:{lk}")
+                                    count_ref[0] += 1
+                        
+                        if pg2 >= dr.get("data", {}).get("total_page", 1):
+                            break
+                        pg2 += 1
+                
+                if pg >= dr.get("data", {}).get("total_page", 1):
+                    break
+                pg += 1
+        
+        results.append(f"\n{'=' * 40}")
+        results.append(f"✅ TOTAL: {count_ref[0]} links extracted")
+        
+        return results, count_ref[0]
     
-    results.append(f"\n{'=' * 40}")
-    results.append(f"✅ TOTAL: {count} links extracted")
-    
-    return results, count
+    except Exception as e:
+        logger.error(f"Extraction error: {e}")
+        return None, f"❌ Error: {str(e)}"
 
 # ===== BOT HANDLERS =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_msg = """
-🎓 **UTKARSH EXTRACTOR BOT** 🎓
+🎓 *UTKARSH EXTRACTOR BOT* 🎓
 
 Welcome! This bot extracts video links from Utkarsh courses.
 
-**Commands:**
+*Commands:*
 /login - Login to your Utkarsh account
 /extract - Extract links from a batch
 /logout - Logout from current session
 /status - Check login status
 /help - Show this message
 
-**How to use:**
+*How to use:*
 1️⃣ Use /login to authenticate
 2️⃣ Use /extract and provide Batch ID
 3️⃣ Wait for extraction to complete
 4️⃣ Download the text file with links
 
-⚠️ *Use responsibly and respect copyright!*
+⚠️ _Use responsibly!_
     """
     await update.message.reply_text(welcome_msg, parse_mode='Markdown')
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await start(update, context)
 
-async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if user_id in user_sessions:
         await update.message.reply_text("✅ You're already logged in!\n\nUse /logout first to login with different account.")
         return ConversationHandler.END
     
-    await update.message.reply_text("📱 Enter your **Mobile Number/Email**:", parse_mode='Markdown')
+    await update.message.reply_text("📱 Enter your *Mobile Number/Email*:", parse_mode='Markdown')
     return LOGIN_EMAIL
 
-async def login_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def login_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['email'] = update.message.text.strip()
-    await update.message.reply_text("🔑 Enter your **Password**:", parse_mode='Markdown')
+    await update.message.reply_text("🔑 Enter your *Password*:", parse_mode='Markdown')
     return LOGIN_PASSWORD
 
-async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     email = context.user_data.get('email')
     password = update.message.text.strip()
     
-    await update.message.reply_text("⏳ Logging in, please wait...")
+    status_msg = await update.message.reply_text("⏳ Logging in, please wait...")
     
     try:
         # Create session
@@ -310,7 +325,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cs = csrf_resp.cookies.get('csrf_name')
         
         if not cs:
-            await update.message.reply_text("❌ Failed to get CSRF token. Try again later.")
+            await status_msg.edit_text("❌ Failed to get CSRF token. Try again later.")
             return ConversationHandler.END
         
         # Web headers
@@ -336,7 +351,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dr = ds(r.get("response"))
         
         if not dr or dr.get("status") != 200:
-            await update.message.reply_text("❌ Login failed! Check your credentials.")
+            await status_msg.edit_text("❌ Login failed! Check your credentials.")
             return ConversationHandler.END
         
         h["token"] = dr.get("token")
@@ -347,13 +362,13 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_headers["jwt"] = h["jwt"]
         
         # Get profile
-        p = api("/users/get_my_profile", {}, api_headers, None, None, True)
+        p = api_call("/users/get_my_profile", {}, api_headers, None, None, True)
         
         if not p.get("data"):
-            await update.message.reply_text("❌ Failed to get profile!")
+            await status_msg.edit_text("❌ Failed to get profile!")
             return ConversationHandler.END
         
-        uid = p["data"]["id"]
+        uid = str(p["data"]["id"])
         api_headers["userid"] = uid
         
         # Generate keys
@@ -372,23 +387,24 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'email': email
         }
         
-        await update.message.reply_text(
-            f"✅ **Login Successful!**\n\n"
+        await status_msg.edit_text(
+            f"✅ *Login Successful!*\n\n"
             f"👤 User ID: `{uid}`\n\n"
             f"Use /extract to extract batch links.",
             parse_mode='Markdown'
         )
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        logger.error(f"Login error: {e}")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
     
     return ConversationHandler.END
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Operation cancelled.")
     return ConversationHandler.END
 
-async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if user_id in user_sessions:
         del user_sessions[user_id]
@@ -396,12 +412,12 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("ℹ️ You're not logged in.")
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if user_id in user_sessions:
         session = user_sessions[user_id]
         await update.message.reply_text(
-            f"✅ **Logged In**\n\n"
+            f"✅ *Logged In*\n\n"
             f"📧 Email: {session.get('email', 'N/A')}\n"
             f"🆔 User ID: {session.get('uid', 'N/A')}",
             parse_mode='Markdown'
@@ -409,16 +425,16 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Not logged in. Use /login")
 
-async def extract_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def extract_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if user_id not in user_sessions:
         await update.message.reply_text("❌ Please /login first!")
         return ConversationHandler.END
     
-    await update.message.reply_text("📚 Enter the **Batch ID** to extract:", parse_mode='Markdown')
+    await update.message.reply_text("📚 Enter the *Batch ID* to extract:", parse_mode='Markdown')
     return BATCH_ID
 
-async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     batch_id = update.message.text.strip()
     
@@ -427,7 +443,7 @@ async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     status_msg = await update.message.reply_text(
-        f"⏳ **Extracting Batch {batch_id}...**\n\n"
+        f"⏳ *Extracting Batch {batch_id}...*\n\n"
         f"This may take several minutes. Please wait!",
         parse_mode='Markdown'
     )
@@ -443,33 +459,35 @@ async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         if results is None:
-            await status_msg.edit_text(f"❌ {count}")  # count contains error message
+            await status_msg.edit_text(f"❌ {count}")
             return ConversationHandler.END
         
         # Create file
         file_content = "\n".join(results)
         file_buffer = io.BytesIO(file_content.encode('utf-8'))
-        file_buffer.name = f"Utkarsh_{batch_id}.txt"
+        file_buffer.seek(0)
         
         await status_msg.edit_text(f"✅ Extraction complete! Sending file...")
         
         # Send file
         await update.message.reply_document(
-            document=InputFile(file_buffer, filename=f"Utkarsh_{batch_id}.txt"),
-            caption=f"✅ **Extraction Complete!**\n\n📊 Total Links: {count}\n📂 Batch: {batch_id}",
+            document=file_buffer,
+            filename=f"Utkarsh_{batch_id}.txt",
+            caption=f"✅ *Extraction Complete!*\n\n📊 Total Links: {count}\n📂 Batch: {batch_id}",
             parse_mode='Markdown'
         )
         
         await status_msg.delete()
         
     except Exception as e:
+        logger.error(f"Extract error: {e}")
         await status_msg.edit_text(f"❌ Error during extraction: {str(e)}")
     
     return ConversationHandler.END
 
 # ===== MAIN =====
-def main():
-    print("🚀 Starting Utkarsh Extractor Bot...")
+def main() -> None:
+    logger.info("🚀 Starting Utkarsh Extractor Bot...")
     
     # Create application
     app = Application.builder().token(BOT_TOKEN).build()
@@ -499,12 +517,12 @@ def main():
     app.add_handler(login_handler)
     app.add_handler(extract_handler)
     app.add_handler(CommandHandler('logout', logout))
-    app.add_handler(CommandHandler('status', status))
+    app.add_handler(CommandHandler('status', status_cmd))
     
-    print("✅ Bot is running!")
+    logger.info("✅ Bot is running!")
     
     # Run bot
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
