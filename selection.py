@@ -11,9 +11,9 @@ from Crypto.Util.Padding import pad, unpad
 urllib3.disable_warnings()
 
 # ================= HARD CODED CREDS =================
-BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"
-UT_EMAIL = "7891745633"
-UT_PASSWORD = "Sitar@123"
+BOT_TOKEN = "PASTE_BOT_TOKEN_HERE"
+UT_EMAIL = "EMAIL_OR_MOBILE"
+UT_PASSWORD = "PASSWORD"
 
 # ================= SESSION / URLS =================
 session = requests.Session()
@@ -32,7 +32,7 @@ h = {
 
 csrf_token = None
 
-# ================= CRYPTO (ORIGINAL) =================
+# ================= CRYPTO =================
 def encrypt_stream(plain):
     key = '%!$!%_$&!%F)&^!^'.encode()
     iv = '#*y*#2yJ*#$wJv*v'.encode()
@@ -47,7 +47,6 @@ def decrypt_stream(enc):
         raw = cipher.decrypt(b64decode(enc))
         dec = raw.decode(errors="ignore")
 
-        # clean garbage till valid JSON
         for i in range(len(dec), 0, -1):
             try:
                 return json.loads(dec[:i])
@@ -76,11 +75,7 @@ def utkarsh_login():
 
         r2 = session.post(LOGIN_URL, data=payload, headers=h, timeout=15)
 
-        try:
-            js = r2.json()
-        except:
-            return False, "Login response not JSON"
-
+        js = r2.json()
         if not isinstance(js, dict) or "response" not in js:
             return False, f"Login failed: {js}"
 
@@ -100,7 +95,7 @@ def start(m):
 def ping(m):
     bot.reply_to(m, "🏓 Alive")
 
-# ================= EXTRACT (REAL FLOW) =================
+# ================= EXTRACT =================
 @bot.message_handler(commands=["extract"])
 def extract(m):
     try:
@@ -144,7 +139,7 @@ def extract(m):
         # -------- LAYER 2 --------
         for subj in dr1["data"]:
             sid = subj.get("id")
-            sname = subj.get("title")
+            sname = subj.get("title", "Untitled")
 
             d2 = {
                 "course_id": batch_id,
@@ -169,10 +164,18 @@ def extract(m):
             if not dr2 or "data" not in dr2:
                 continue
 
-            # -------- LAYER 3 --------
-            for topic in dr2["data"]["list"]:
-                tid = topic.get("id")
-                tname = topic.get("title")
+            # 🔥 FIX IS HERE 🔥
+            data_block = dr2.get("data")
+
+            if isinstance(data_block, dict):
+                items = data_block.get("list", [])
+            elif isinstance(data_block, list):
+                items = data_block
+            else:
+                items = []
+
+            for topic in items:
+                tname = topic.get("title", "Untitled topic")
 
                 bot.send_message(
                     m.chat.id,
@@ -189,7 +192,7 @@ def extract(m):
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print("🚀 Utkarsh bot starting (REAL FLOW)")
+    print("🚀 Utkarsh bot starting (FIXED)")
 
     while True:
         try:
