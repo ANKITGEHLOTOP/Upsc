@@ -11,9 +11,9 @@ from Crypto.Util.Padding import pad, unpad
 urllib3.disable_warnings()
 
 # ================= HARD CODED CREDS =================
-BOT_TOKEN = "PASTE_BOT_TOKEN_HERE"
-UT_EMAIL = "EMAIL_OR_MOBILE"
-UT_PASSWORD = "PASSWORD"
+BOT_TOKEN = "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo"
+UT_EMAIL = "7891745633"
+UT_PASSWORD = "Sitar@123"
 
 # ================= SESSION / URLS =================
 session = requests.Session()
@@ -22,15 +22,13 @@ BASE_URL = "https://online.utkarsh.com/"
 LOGIN_URL = BASE_URL + "web/Auth/login"
 TILES_DATA_URL = BASE_URL + "web/Course/tiles_data"
 LAYER_TWO_DATA_URL = BASE_URL + "web/Course/get_layer_two_data"
-
 # ================= HEADERS =================
 h = {
     "X-Requested-With": "XMLHttpRequest",
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "User-Agent": "Mozilla/5.0"
 }
-
-csrf_token = None
+csrf_token =
 
 # ================= CRYPTO =================
 def encrypt_stream(plain):
@@ -200,3 +198,4 @@ if __name__ == "__main__":
         except Exception as e:
             print("Polling error:", e)
             time.sleep(5)
+
