@@ -1,28 +1,22 @@
 import os
 import json
-import asyncio
 import requests
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+import telebot
+from telebot import types
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
 from base64 import b64decode, b64encode
 import base64
 import urllib3
 import io
-import logging
-
-# Enable logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+import threading
 
 urllib3.disable_warnings()
 
 # ===== BOT TOKEN =====
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8410273601:AAGyjlU3YpRWnPrwVMNiiUDDFzkN1fceXEo")
+
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # ===== CONSTANTS =====
 API_URL = "https://application.utkarshapp.com/index.php/data_model"
@@ -41,11 +35,15 @@ BASE_HEADERS = {
     "version": "152"
 }
 
-# Conversation states
-LOGIN_EMAIL, LOGIN_PASSWORD, BATCH_ID = range(3)
-
-# User sessions storage
+# User sessions and states storage
 user_sessions = {}
+user_states = {}
+
+# States
+STATE_NONE = 0
+STATE_LOGIN_EMAIL = 1
+STATE_LOGIN_PASSWORD = 2
+STATE_BATCH_ID = 3
 
 # ===== CRYPTO FUNCTIONS =====
 def enc(d, key, iv, c=False):
@@ -183,12 +181,11 @@ def full_extraction(session_data, batch_id):
     iv = session_data['iv']
     
     results = []
-    count_ref = [0]  # Using list to pass by reference
+    count_ref = [0]
     results.append(f"⚡ UTKARSH EXTRACTOR - Batch {batch_id}")
     results.append("=" * 40)
     
     try:
-        # Get course
         d3 = {"course_id": batch_id, "revert_api": "1#0#0#1", "parent_id": 0, "tile_id": "15330", "layer": 1, "type": "course_combo"}
         r = s.post("https://online.utkarsh.com/web/Course/tiles_data",
                    headers=h, data={'tile_input': es(json.dumps(d3)), 'csrf_name': cs}, verify=False, timeout=30).json()
@@ -263,11 +260,12 @@ def full_extraction(session_data, batch_id):
         return results, count_ref[0]
     
     except Exception as e:
-        logger.error(f"Extraction error: {e}")
         return None, f"❌ Error: {str(e)}"
 
 # ===== BOT HANDLERS =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
     welcome_msg = """
 🎓 *UTKARSH EXTRACTOR BOT* 🎓
 
@@ -278,7 +276,7 @@ Welcome! This bot extracts video links from Utkarsh courses.
 /extract - Extract links from a batch
 /logout - Logout from current session
 /status - Check login status
-/help - Show this message
+/cancel - Cancel current operation
 
 *How to use:*
 1️⃣ Use /login to authenticate
@@ -288,47 +286,77 @@ Welcome! This bot extracts video links from Utkarsh courses.
 
 ⚠️ _Use responsibly!_
     """
-    await update.message.reply_text(welcome_msg, parse_mode='Markdown')
+    bot.reply_to(message, welcome_msg, parse_mode='Markdown')
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await start(update, context)
+@bot.message_handler(commands=['cancel'])
+def cancel_operation(message):
+    user_id = message.from_user.id
+    user_states[user_id] = STATE_NONE
+    bot.reply_to(message, "❌ Operation cancelled.")
 
-async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+@bot.message_handler(commands=['login'])
+def login_start(message):
+    user_id = message.from_user.id
+    
     if user_id in user_sessions:
-        await update.message.reply_text("✅ You're already logged in!\n\nUse /logout first to login with different account.")
-        return ConversationHandler.END
+        bot.reply_to(message, "✅ You're already logged in!\n\nUse /logout first to login with different account.")
+        return
     
-    await update.message.reply_text("📱 Enter your *Mobile Number/Email*:", parse_mode='Markdown')
-    return LOGIN_EMAIL
+    user_states[user_id] = STATE_LOGIN_EMAIL
+    bot.reply_to(message, "📱 Enter your *Mobile Number/Email*:", parse_mode='Markdown')
 
-async def login_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['email'] = update.message.text.strip()
-    await update.message.reply_text("🔑 Enter your *Password*:", parse_mode='Markdown')
-    return LOGIN_PASSWORD
+@bot.message_handler(commands=['logout'])
+def logout(message):
+    user_id = message.from_user.id
+    if user_id in user_sessions:
+        del user_sessions[user_id]
+        bot.reply_to(message, "✅ Logged out successfully!")
+    else:
+        bot.reply_to(message, "ℹ️ You're not logged in.")
 
-async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    email = context.user_data.get('email')
-    password = update.message.text.strip()
+@bot.message_handler(commands=['status'])
+def status(message):
+    user_id = message.from_user.id
+    if user_id in user_sessions:
+        session = user_sessions[user_id]
+        bot.reply_to(message, 
+            f"✅ *Logged In*\n\n"
+            f"📧 Email: {session.get('email', 'N/A')}\n"
+            f"🆔 User ID: {session.get('uid', 'N/A')}",
+            parse_mode='Markdown'
+        )
+    else:
+        bot.reply_to(message, "❌ Not logged in. Use /login")
+
+@bot.message_handler(commands=['extract'])
+def extract_start(message):
+    user_id = message.from_user.id
     
-    status_msg = await update.message.reply_text("⏳ Logging in, please wait...")
+    if user_id not in user_sessions:
+        bot.reply_to(message, "❌ Please /login first!")
+        return
+    
+    user_states[user_id] = STATE_BATCH_ID
+    bot.reply_to(message, "📚 Enter the *Batch ID* to extract:", parse_mode='Markdown')
+
+def do_login(message, email, password):
+    user_id = message.from_user.id
+    
+    status_msg = bot.reply_to(message, "⏳ Logging in, please wait...")
     
     try:
-        # Create session
         s = requests.Session()
         adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
         s.mount('https://', adapter)
         
-        # Get CSRF
         csrf_resp = s.get("https://online.utkarsh.com/", verify=False, timeout=15)
         cs = csrf_resp.cookies.get('csrf_name')
         
         if not cs:
-            await status_msg.edit_text("❌ Failed to get CSRF token. Try again later.")
-            return ConversationHandler.END
+            bot.edit_message_text("❌ Failed to get CSRF token. Try again later.", 
+                                  message.chat.id, status_msg.message_id)
+            return
         
-        # Web headers
         h = {
             'Host': 'online.utkarsh.com',
             'Accept': 'application/json, text/javascript, */*; q=0.01',
@@ -337,7 +365,6 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             'User-Agent': 'Mozilla/5.0 Chrome/119.0.0.0'
         }
         
-        # Login
         login_data = {
             'csrf_name': cs,
             'mobile': email,
@@ -351,31 +378,29 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         dr = ds(r.get("response"))
         
         if not dr or dr.get("status") != 200:
-            await status_msg.edit_text("❌ Login failed! Check your credentials.")
-            return ConversationHandler.END
+            bot.edit_message_text("❌ Login failed! Check your credentials.", 
+                                  message.chat.id, status_msg.message_id)
+            return
         
         h["token"] = dr.get("token")
         h["jwt"] = dr["data"]["jwt"]
         
-        # API headers
         api_headers = BASE_HEADERS.copy()
         api_headers["jwt"] = h["jwt"]
         
-        # Get profile
         p = api_call("/users/get_my_profile", {}, api_headers, None, None, True)
         
         if not p.get("data"):
-            await status_msg.edit_text("❌ Failed to get profile!")
-            return ConversationHandler.END
+            bot.edit_message_text("❌ Failed to get profile!", 
+                                  message.chat.id, status_msg.message_id)
+            return
         
         uid = str(p["data"]["id"])
         api_headers["userid"] = uid
         
-        # Generate keys
         key = "".join(key_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
         iv = "".join(iv_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
         
-        # Store session
         user_sessions[user_id] = {
             'session': s,
             'web_headers': h,
@@ -387,142 +412,96 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             'email': email
         }
         
-        await status_msg.edit_text(
+        bot.edit_message_text(
             f"✅ *Login Successful!*\n\n"
             f"👤 User ID: `{uid}`\n\n"
             f"Use /extract to extract batch links.",
+            message.chat.id, status_msg.message_id,
             parse_mode='Markdown'
         )
         
     except Exception as e:
-        logger.error(f"Login error: {e}")
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
-    
-    return ConversationHandler.END
+        bot.edit_message_text(f"❌ Error: {str(e)}", 
+                              message.chat.id, status_msg.message_id)
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("❌ Operation cancelled.")
-    return ConversationHandler.END
-
-async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if user_id in user_sessions:
-        del user_sessions[user_id]
-        await update.message.reply_text("✅ Logged out successfully!")
-    else:
-        await update.message.reply_text("ℹ️ You're not logged in.")
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if user_id in user_sessions:
-        session = user_sessions[user_id]
-        await update.message.reply_text(
-            f"✅ *Logged In*\n\n"
-            f"📧 Email: {session.get('email', 'N/A')}\n"
-            f"🆔 User ID: {session.get('uid', 'N/A')}",
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text("❌ Not logged in. Use /login")
-
-async def extract_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    if user_id not in user_sessions:
-        await update.message.reply_text("❌ Please /login first!")
-        return ConversationHandler.END
-    
-    await update.message.reply_text("📚 Enter the *Batch ID* to extract:", parse_mode='Markdown')
-    return BATCH_ID
-
-async def extract_batch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    batch_id = update.message.text.strip()
+def do_extract(message, batch_id):
+    user_id = message.from_user.id
     
     if user_id not in user_sessions:
-        await update.message.reply_text("❌ Session expired! Please /login again.")
-        return ConversationHandler.END
+        bot.reply_to(message, "❌ Session expired! Please /login again.")
+        return
     
-    status_msg = await update.message.reply_text(
+    status_msg = bot.reply_to(message, 
         f"⏳ *Extracting Batch {batch_id}...*\n\n"
         f"This may take several minutes. Please wait!",
         parse_mode='Markdown'
     )
     
     try:
-        # Run extraction in executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        results, count = await loop.run_in_executor(
-            None,
-            full_extraction,
-            user_sessions[user_id],
-            batch_id
-        )
+        results, count = full_extraction(user_sessions[user_id], batch_id)
         
         if results is None:
-            await status_msg.edit_text(f"❌ {count}")
-            return ConversationHandler.END
+            bot.edit_message_text(f"❌ {count}", message.chat.id, status_msg.message_id)
+            return
         
-        # Create file
         file_content = "\n".join(results)
         file_buffer = io.BytesIO(file_content.encode('utf-8'))
+        file_buffer.name = f"Utkarsh_{batch_id}.txt"
         file_buffer.seek(0)
         
-        await status_msg.edit_text(f"✅ Extraction complete! Sending file...")
+        bot.edit_message_text("✅ Extraction complete! Sending file...", 
+                              message.chat.id, status_msg.message_id)
         
-        # Send file
-        await update.message.reply_document(
-            document=file_buffer,
-            filename=f"Utkarsh_{batch_id}.txt",
+        bot.send_document(
+            message.chat.id,
+            file_buffer,
             caption=f"✅ *Extraction Complete!*\n\n📊 Total Links: {count}\n📂 Batch: {batch_id}",
             parse_mode='Markdown'
         )
         
-        await status_msg.delete()
+        bot.delete_message(message.chat.id, status_msg.message_id)
         
     except Exception as e:
-        logger.error(f"Extract error: {e}")
-        await status_msg.edit_text(f"❌ Error during extraction: {str(e)}")
+        bot.edit_message_text(f"❌ Error during extraction: {str(e)}", 
+                              message.chat.id, status_msg.message_id)
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id, STATE_NONE)
+    text = message.text.strip()
     
-    return ConversationHandler.END
+    if state == STATE_LOGIN_EMAIL:
+        user_states[user_id] = STATE_LOGIN_PASSWORD
+        user_sessions[user_id + 1000000000] = {'temp_email': text}  # Temp storage
+        bot.reply_to(message, "🔑 Enter your *Password*:", parse_mode='Markdown')
+    
+    elif state == STATE_LOGIN_PASSWORD:
+        user_states[user_id] = STATE_NONE
+        temp_data = user_sessions.pop(user_id + 1000000000, {})
+        email = temp_data.get('temp_email', '')
+        
+        # Run login in thread to avoid blocking
+        thread = threading.Thread(target=do_login, args=(message, email, text))
+        thread.start()
+    
+    elif state == STATE_BATCH_ID:
+        user_states[user_id] = STATE_NONE
+        
+        # Run extraction in thread to avoid blocking
+        thread = threading.Thread(target=do_extract, args=(message, text))
+        thread.start()
+    
+    else:
+        bot.reply_to(message, "❓ Unknown command. Use /help to see available commands.")
 
 # ===== MAIN =====
-def main() -> None:
-    logger.info("🚀 Starting Utkarsh Extractor Bot...")
-    
-    # Create application
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    # Login conversation handler
-    login_handler = ConversationHandler(
-        entry_points=[CommandHandler('login', login_start)],
-        states={
-            LOGIN_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_email)],
-            LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_password)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    
-    # Extract conversation handler
-    extract_handler = ConversationHandler(
-        entry_points=[CommandHandler('extract', extract_start)],
-        states={
-            BATCH_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, extract_batch)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    
-    # Add handlers
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('help', help_cmd))
-    app.add_handler(login_handler)
-    app.add_handler(extract_handler)
-    app.add_handler(CommandHandler('logout', logout))
-    app.add_handler(CommandHandler('status', status_cmd))
-    
-    logger.info("✅ Bot is running!")
-    
-    # Run bot
-    app.run_polling(drop_pending_updates=True)
-
 if __name__ == "__main__":
-    main()
+    print("🚀 Starting Utkarsh Extractor Bot...")
+    print("✅ Bot is running!")
+    
+    # Remove webhook if any
+    bot.remove_webhook()
+    
+    # Start polling
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
