@@ -9,6 +9,7 @@ import base64
 import urllib3
 import io
 import threading
+import traceback
 
 urllib3.disable_warnings()
 
@@ -73,8 +74,8 @@ def ds(e):
                 return json.loads(p[:x])
             except:
                 continue
-    except:
-        pass
+    except Exception as ex:
+        print(f"ds() error: {ex}")
     return None
 
 def es(d):
@@ -83,28 +84,51 @@ def es(d):
     except:
         return None
 
-# ===== LOGIN FUNCTION =====
+# ===== LOGIN FUNCTION WITH DEBUG =====
 def do_login():
     global global_session
     
+    print("\n" + "="*50)
+    print("🔐 STARTING LOGIN PROCESS...")
+    print("="*50)
+    
     try:
+        # Step 1: Create session
+        print("\n[1] Creating session...")
         s = requests.Session()
         adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
         s.mount('https://', adapter)
+        print("✓ Session created")
         
+        # Step 2: Get CSRF
+        print("\n[2] Getting CSRF token...")
         csrf_resp = s.get("https://online.utkarsh.com/", verify=False, timeout=15)
+        print(f"   Status Code: {csrf_resp.status_code}")
+        print(f"   Cookies: {dict(csrf_resp.cookies)}")
+        
         cs = csrf_resp.cookies.get('csrf_name')
-        
         if not cs:
-            return False, "CSRF Failed"
+            print("❌ CSRF token not found in cookies!")
+            return False, "CSRF Failed - No token in cookies"
+        print(f"✓ CSRF Token: {cs[:20]}...")
         
+        # Step 3: Prepare headers
+        print("\n[3] Preparing headers...")
         h = {
             'Host': 'online.utkarsh.com',
             'Accept': 'application/json, text/javascript, */*; q=0.01',
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
             'X-Requested-With': 'XMLHttpRequest',
-            'User-Agent': 'Mozilla/5.0 Chrome/119.0.0.0'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Origin': 'https://online.utkarsh.com',
+            'Referer': 'https://online.utkarsh.com/'
         }
+        print("✓ Headers prepared")
+        
+        # Step 4: Login request
+        print("\n[4] Sending login request...")
+        print(f"   Mobile: {AUTO_MOBILE}")
+        print(f"   Password: {'*' * len(AUTO_PASSWORD)}")
         
         login_data = {
             'csrf_name': cs,
@@ -115,29 +139,104 @@ def do_login():
             'device_token': 'null'
         }
         
-        r = s.post("https://online.utkarsh.com/web/Auth/login", data=login_data, headers=h, verify=False, timeout=15).json()
-        dr = ds(r.get("response"))
+        r = s.post("https://online.utkarsh.com/web/Auth/login", 
+                   data=login_data, 
+                   headers=h, 
+                   verify=False, 
+                   timeout=15)
         
-        if not dr or dr.get("status") != 200:
-            return False, "Login Failed"
+        print(f"   Response Status: {r.status_code}")
+        print(f"   Response Length: {len(r.text)} chars")
+        print(f"   Response Preview: {r.text[:200]}...")
         
-        h["token"] = dr.get("token")
-        h["jwt"] = dr["data"]["jwt"]
+        # Step 5: Parse response
+        print("\n[5] Parsing response...")
+        try:
+            r_json = r.json()
+            print(f"   JSON Keys: {list(r_json.keys())}")
+        except Exception as e:
+            print(f"❌ JSON Parse Error: {e}")
+            print(f"   Raw Response: {r.text[:500]}")
+            return False, f"JSON Parse Failed: {e}"
         
+        # Step 6: Decrypt response
+        print("\n[6] Decrypting response...")
+        response_data = r_json.get("response")
+        if not response_data:
+            print(f"❌ No 'response' field in JSON!")
+            print(f"   Full JSON: {r_json}")
+            return False, "No response field"
+        
+        print(f"   Encrypted data length: {len(response_data)}")
+        
+        dr = ds(response_data)
+        if not dr:
+            print("❌ Decryption failed!")
+            print(f"   Encrypted data: {response_data[:100]}...")
+            return False, "Decryption Failed"
+        
+        print(f"✓ Decrypted! Keys: {list(dr.keys())}")
+        print(f"   Status: {dr.get('status')}")
+        print(f"   Message: {dr.get('message', dr.get('msg', 'N/A'))}")
+        
+        # Step 7: Check status
+        print("\n[7] Checking login status...")
+        status_code = dr.get("status")
+        if status_code != 200:
+            print(f"❌ Login failed with status: {status_code}")
+            print(f"   Full response: {json.dumps(dr, indent=2)[:500]}")
+            return False, f"Status {status_code}: {dr.get('message', dr.get('msg', 'Unknown error'))}"
+        
+        # Step 8: Extract tokens
+        print("\n[8] Extracting tokens...")
+        if "data" not in dr:
+            print("❌ No 'data' field in response!")
+            print(f"   Response: {dr}")
+            return False, "No data in response"
+        
+        token = dr.get("token")
+        jwt = dr["data"].get("jwt")
+        
+        if not jwt:
+            print("❌ No JWT token!")
+            print(f"   Data: {dr['data']}")
+            return False, "No JWT token"
+        
+        print(f"✓ Token: {token[:20] if token else 'None'}...")
+        print(f"✓ JWT: {jwt[:30]}...")
+        
+        h["token"] = token
+        h["jwt"] = jwt
+        
+        # Step 9: Get profile
+        print("\n[9] Getting user profile...")
         api_headers = BASE_HEADERS.copy()
-        api_headers["jwt"] = h["jwt"]
+        api_headers["jwt"] = jwt
         
         p = api_call("/users/get_my_profile", {}, api_headers, None, None, True)
+        print(f"   Profile response keys: {list(p.keys())}")
         
         if not p.get("data"):
+            print("❌ Profile fetch failed!")
+            print(f"   Response: {p}")
             return False, "Profile Failed"
         
         uid = str(p["data"]["id"])
+        name = p["data"].get("name", "Unknown")
+        print(f"✓ User ID: {uid}")
+        print(f"✓ Name: {name}")
+        
+        # Step 10: Generate keys
+        print("\n[10] Generating encryption keys...")
         api_headers["userid"] = uid
         
         key = "".join(key_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
         iv = "".join(iv_chars[int(i)] for i in (uid + "1524567456436545")[:16]).encode()
+        print(f"✓ Key generated: {key[:10]}...")
+        print(f"✓ IV generated: {iv[:10]}...")
         
+        # Step 11: Save session
+        print("\n[11] Saving session...")
         global_session = {
             'session': s,
             'web_headers': h,
@@ -145,12 +244,20 @@ def do_login():
             'csrf': cs,
             'key': key,
             'iv': iv,
-            'uid': uid
+            'uid': uid,
+            'name': name
         }
+        
+        print("\n" + "="*50)
+        print("✅ LOGIN SUCCESSFUL!")
+        print(f"   User: {name} (ID: {uid})")
+        print("="*50 + "\n")
         
         return True, uid
         
     except Exception as e:
+        print(f"\n❌ EXCEPTION: {e}")
+        print(f"   Traceback: {traceback.format_exc()}")
         return False, str(e)
 
 # ===== EXTRACTION FUNCTIONS =====
@@ -264,12 +371,11 @@ def full_extraction(batch_id):
         dr3 = ds(r.get("response"))
         
         if not dr3:
-            # Try re-login
             global_session = None
             success, msg = do_login()
             if not success:
                 return None, "❌ Session expired and re-login failed!"
-            return full_extraction(batch_id)  # Retry
+            return full_extraction(batch_id)
         
         courses = dr3.get("data", [])
         if isinstance(courses, dict):
@@ -351,14 +457,64 @@ def send_welcome(message):
 
 *Commands:*
 /extract `<batch_id>` - Extract links
-/status - Check login status
+/login - Force re-login
+/status - Check status
+/debug - Show debug info
 
 *Example:*
 `/extract 12345`
-
-Just send me a Batch ID and I'll extract all links!
     """
     bot.reply_to(message, welcome_msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['login'])
+def force_login(message):
+    global global_session
+    global_session = None
+    
+    status_msg = bot.reply_to(message, "⏳ Logging in...")
+    
+    success, msg = do_login()
+    
+    if success:
+        bot.edit_message_text(
+            f"✅ *Login Successful!*\n\n"
+            f"👤 User ID: `{msg}`\n"
+            f"📱 Mobile: {AUTO_MOBILE}",
+            message.chat.id, status_msg.message_id,
+            parse_mode='Markdown'
+        )
+    else:
+        bot.edit_message_text(
+            f"❌ *Login Failed!*\n\n"
+            f"Error: `{msg}`\n\n"
+            f"Check Koyeb logs for details.",
+            message.chat.id, status_msg.message_id,
+            parse_mode='Markdown'
+        )
+
+@bot.message_handler(commands=['debug'])
+def debug_info(message):
+    global global_session
+    
+    info = f"""
+🔧 *Debug Info*
+
+*Session:* {'Active' if global_session else 'None'}
+*Mobile:* {AUTO_MOBILE}
+*Password:* {'*' * len(AUTO_PASSWORD)}
+
+*Session Details:*
+"""
+    if global_session:
+        info += f"""
+- UID: `{global_session.get('uid', 'N/A')}`
+- Name: {global_session.get('name', 'N/A')}
+- CSRF: `{global_session.get('csrf', 'N/A')[:20]}...`
+"""
+    else:
+        info += "\nNo active session. Use /login"
+    
+    bot.reply_to(message, info, parse_mode='Markdown')
 
 @bot.message_handler(commands=['status'])
 def status(message):
@@ -367,11 +523,12 @@ def status(message):
         bot.reply_to(message, 
             f"✅ *Logged In*\n\n"
             f"📱 Mobile: {AUTO_MOBILE}\n"
-            f"🆔 User ID: {global_session.get('uid', 'N/A')}",
+            f"🆔 User ID: {global_session.get('uid', 'N/A')}\n"
+            f"👤 Name: {global_session.get('name', 'N/A')}",
             parse_mode='Markdown'
         )
     else:
-        bot.reply_to(message, "⏳ Not logged in yet. Will auto-login on first extract.")
+        bot.reply_to(message, "❌ Not logged in. Use /login")
 
 @bot.message_handler(commands=['extract'])
 def extract_cmd(message):
@@ -381,12 +538,12 @@ def extract_cmd(message):
         return
     
     batch_id = args[1].strip()
-    do_extract(message, batch_id)
+    thread = threading.Thread(target=do_extract, args=(message, batch_id))
+    thread.start()
 
 def do_extract(message, batch_id):
     status_msg = bot.reply_to(message, 
-        f"⏳ *Extracting Batch {batch_id}...*\n\n"
-        f"This may take several minutes. Please wait!",
+        f"⏳ *Extracting Batch {batch_id}...*\n\nThis may take several minutes!",
         parse_mode='Markdown'
     )
     
@@ -419,31 +576,31 @@ def do_extract(message, batch_id):
 
 @bot.message_handler(func=lambda message: message.text and message.text.isdigit())
 def handle_batch_id(message):
-    """If user sends just a number, treat it as batch ID"""
     batch_id = message.text.strip()
-    
-    # Run in thread to avoid blocking
     thread = threading.Thread(target=do_extract, args=(message, batch_id))
     thread.start()
 
 @bot.message_handler(func=lambda message: True)
 def handle_other(message):
-    bot.reply_to(message, "❓ Send me a Batch ID (number) or use /extract <batch_id>")
+    bot.reply_to(message, "❓ Send a Batch ID or use /extract <batch_id>")
 
 # ===== MAIN =====
 if __name__ == "__main__":
     print("🚀 Starting Utkarsh Extractor Bot...")
-    print(f"📱 Auto-login: {AUTO_MOBILE}")
+    print(f"📱 Credentials: {AUTO_MOBILE}")
+    print("-" * 50)
     
-    # Pre-login at startup
-    print("⏳ Logging in...")
+    # Try login at startup
     success, msg = do_login()
     if success:
-        print(f"✅ Logged in! User ID: {msg}")
+        print(f"\n✅ Ready! Logged in as: {msg}")
     else:
-        print(f"⚠️ Initial login failed: {msg} (will retry on first request)")
+        print(f"\n⚠️ Initial login failed: {msg}")
+        print("Will retry on first request...")
     
-    print("✅ Bot is running!")
+    print("\n" + "="*50)
+    print("🤖 Bot is running! Waiting for messages...")
+    print("="*50 + "\n")
     
     bot.remove_webhook()
     bot.infinity_polling(timeout=60, long_polling_timeout=60)
